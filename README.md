@@ -1,6 +1,6 @@
 # CISSP Test Simulator
 
-A lightweight Flask web application for managing CISSP-style practice questions, creating randomized tests, and focusing on missed questions.
+A lightweight Node.js web application for managing CISSP-style practice questions, creating randomized tests, and focusing on missed questions.
 
 ## Features
 
@@ -13,21 +13,19 @@ A lightweight Flask web application for managing CISSP-style practice questions,
 
 1. **Install dependencies**
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+   The application has no external runtime dependencies. If you would like to keep a local `node_modules` directory for future extensions you can run `npm install`, but it is not required to run the server.
 
 2. **Run the development server**
 
    ```bash
-   flask --app app run --debug
+   node server.js
    ```
 
    The application will be available at <http://127.0.0.1:5000/>.
 
 3. **Import sample questions (optional)**
 
-   Use the provided [`sample_data/sample_questions.json`](sample_data/sample_questions.json) file to populate the question bank.
+Use the provided [`sample_data/sample_questions.json`](sample_data/sample_questions.json) file to populate the question bank. Copy the JSON payload into the importer form.
 
 ## Question JSON format
 
