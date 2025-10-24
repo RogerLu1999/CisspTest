@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block title %}Review Mistakes · CISSP Test Simulator{% endblock %}
+{% block content %}
+  <div class="row justify-content-center">
+    <div class="col-lg-8">
+      <div class="card">
+        <div class="card-body">
+          <h5 class="card-title">Review questions answered incorrectly</h5>
+          {% if review_questions %}
+            <p class="card-text">You have {{ review_questions|length }} question(s) flagged for review. Create a focused session to revisit them.</p>
+            <form method="post" class="row g-3 align-items-center">
+              <div class="col-sm-4">
+                <label for="total_questions" class="col-form-label">Questions to review</label>
+              </div>
+              <div class="col-sm-4">
+                <input type="number" class="form-control" id="total_questions" name="total_questions" min="1" max="{{ review_questions|length }}" value="{{ review_questions|length }}" required>
+              </div>
+              <div class="col-sm-4 d-grid">
+                <button type="submit" class="btn btn-warning">Start Review</button>
+              </div>
+            </form>
+            <hr>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead>
+                  <tr>
+                    <th scope="col">Question</th>
+                    <th scope="col">Domain</th>
+                    <th scope="col">Times Missed</th>
+                    <th scope="col">Last Attempt (UTC)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for question in review_questions %}
+                    {% set stats = wrong_lookup.get(question.id) %}
+                    <tr>
+                      <td>{{ question.question }}</td>
+                      <td>{{ question.domain }}</td>
+                      <td>{{ stats.wrong_count if stats else 0 }}</td>
+                      <td>{{ stats.last_attempt if stats else 'N/A' }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <p class="card-text text-muted">No questions have been marked incorrect yet. Complete a practice test to begin building your review set.</p>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

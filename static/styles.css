@@ -1,0 +1,25 @@
+body {
+  background-color: #f7f9fc;
+}
+
+.card {
+  box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+}
+
+.alert-container {
+  position: sticky;
+  top: 1rem;
+  z-index: 1030;
+}
+
+.list-group-item-danger {
+  background-color: #f8d7da;
+}
+
+.list-group-item-success {
+  background-color: #d1e7dd;
+}
+
+pre code {
+  white-space: pre-wrap;
+}
