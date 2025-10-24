@@ -1,0 +1,13 @@
+{
+  "name": "cissptest",
+  "version": "1.0.0",
+  "description": "A lightweight Node.js web application for managing CISSP-style practice questions, creating randomized tests, and focusing on missed questions.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
