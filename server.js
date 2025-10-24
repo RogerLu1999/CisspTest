@@ -9,7 +9,7 @@ const DATA_DIR = path.join(BASE_DIR, 'data');
 const QUESTIONS_FILE = path.join(DATA_DIR, 'questions.json');
 const WRONG_FILE = path.join(DATA_DIR, 'wrong_questions.json');
 const HOST = process.env.HOST || '0.0.0.0';
-const PORT = process.env.PORT ? Number(process.env.PORT) : 6000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8000;
 
 const DNS_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
