@@ -21,7 +21,7 @@ A lightweight Node.js web application for managing CISSP-style practice question
    node server.js
    ```
 
-   The application will be available at <http://127.0.0.1:5000/>.
+   The application will be available at <http://127.0.0.1:6000/>.
 
 3. **Import sample questions (optional)**
 
