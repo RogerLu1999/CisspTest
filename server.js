@@ -608,11 +608,15 @@ function renderQuestionList({
                         <div class="form-check mb-0">
                           <input class="form-check-input" type="checkbox" aria-label="Toggle question selection" data-select-master>
                         </div>
-                        <div class="btn-group btn-group-sm" role="group" aria-label="Selection scope">
-                          <input type="radio" class="btn-check" name="selection_scope" id="selection_scope_page" value="page" autocomplete="off" form="exportForm" data-selection-scope checked>
-                          <label class="btn btn-outline-secondary btn-sm" for="selection_scope_page">Select page</label>
-                          <input type="radio" class="btn-check" name="selection_scope" id="selection_scope_all" value="all" autocomplete="off" form="exportForm" data-selection-scope>
-                          <label class="btn btn-outline-secondary btn-sm" for="selection_scope_all">Select all</label>
+                        <div class="d-flex flex-column align-items-center gap-1" role="group" aria-label="Selection scope">
+                          <div class="form-check mb-0">
+                            <input type="radio" class="form-check-input" name="selection_scope" id="selection_scope_page" value="page" autocomplete="off" form="exportForm" data-selection-scope checked>
+                            <label class="form-check-label small" for="selection_scope_page">Select page</label>
+                          </div>
+                          <div class="form-check mb-0">
+                            <input type="radio" class="form-check-input" name="selection_scope" id="selection_scope_all" value="all" autocomplete="off" form="exportForm" data-selection-scope>
+                            <label class="form-check-label small" for="selection_scope_all">Select all</label>
+                          </div>
                         </div>
                       </div>
                     </th>
@@ -650,9 +654,16 @@ function renderQuestionList({
         const totalQuestions = selectionRoot
           ? Number.parseInt(selectionRoot.getAttribute('data-total-questions') || '0', 10)
           : 0;
+        const bulkDeleteLabelBase = bulkDeleteButton ? bulkDeleteButton.textContent.trim() || 'Delete selected' : 'Delete selected';
         const getScope = () => {
           const active = selectionScopeRadios.find((radio) => radio.checked && !radio.disabled);
           return active ? active.value : 'page';
+        };
+        const getSelectedCount = (scope) => {
+          if (scope === 'all') {
+            return selectAllPagesInput && selectAllPagesInput.value === '1' ? totalQuestions : 0;
+          }
+          return itemCheckboxes.filter((checkbox) => checkbox.checked).length;
         };
         const ensureControlsAvailability = () => {
           const hasItems = itemCheckboxes.length > 0;
@@ -688,13 +699,19 @@ function renderQuestionList({
           }
           if (!itemCheckboxes.length) {
             bulkDeleteButton.disabled = true;
+            bulkDeleteButton.textContent = bulkDeleteLabelBase;
             return;
           }
+          const selectedCount = getSelectedCount(scope);
           if (scope === 'all') {
-            bulkDeleteButton.disabled = !(selectAllPagesInput && selectAllPagesInput.value === '1');
+            bulkDeleteButton.disabled = selectedCount === 0;
           } else {
-            const checkedCount = itemCheckboxes.filter((checkbox) => checkbox.checked).length;
-            bulkDeleteButton.disabled = checkedCount === 0;
+            bulkDeleteButton.disabled = selectedCount === 0;
+          }
+          if (selectedCount > 0) {
+            bulkDeleteButton.textContent = bulkDeleteLabelBase + ' (' + selectedCount + ')';
+          } else {
+            bulkDeleteButton.textContent = bulkDeleteLabelBase;
           }
         };
         const updateMasterState = (scope) => {
@@ -790,6 +807,7 @@ function renderQuestionList({
             const scope = getScope();
             const usingAllScope = scope === 'all' && selectAllPagesInput && selectAllPagesInput.value === '1';
             const hasPageSelection = itemCheckboxes.some((checkbox) => checkbox.checked);
+            const selectedCount = getSelectedCount(scope);
             if (submitter && submitter.matches('[data-bulk-delete]')) {
               if (!usingAllScope && !hasPageSelection) {
                 event.preventDefault();
@@ -801,9 +819,10 @@ function renderQuestionList({
                 window.alert('No questions match the current filters to delete.');
                 return;
               }
+              const countText = selectedCount === 1 ? '1 question' : selectedCount + ' questions';
               const message = usingAllScope
-                ? 'Delete all questions that match the current filters? This action cannot be undone.'
-                : 'Delete the selected questions? This action cannot be undone.';
+                ? 'Delete all ' + countText + ' that match the current filters? This action cannot be undone.'
+                : 'Delete the selected ' + countText + '? This action cannot be undone.';
               if (!window.confirm(message)) {
                 event.preventDefault();
                 return;
