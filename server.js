@@ -151,6 +151,40 @@ function normalizeQuestion(rawQuestion) {
   };
 }
 
+function filterQuestionsByParams(questions, domainFilter, searchFilter) {
+  const domain = (domainFilter || '').trim();
+  const search = (searchFilter || '').trim();
+  const searchLower = search.toLowerCase();
+  return questions.filter((question) => {
+    if (domain && question.domain !== domain) {
+      return false;
+    }
+    if (searchLower) {
+      const haystack = `${question.question || ''} ${question.comment || ''}`.toLowerCase();
+      if (!haystack.includes(searchLower)) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function buildQuestionRedirectUrl(pageParam, domainFilter, searchFilter) {
+  const domain = (domainFilter || '').trim();
+  const search = (searchFilter || '').trim();
+  const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 1;
+  const params = new URLSearchParams();
+  if (domain) {
+    params.set('domain', domain);
+  }
+  if (search) {
+    params.set('q', search);
+  }
+  params.set('page', String(page));
+  const query = params.toString();
+  return query ? `/questions?${query}` : '/questions';
+}
+
 function parseChoicesInput(value) {
   if (!value) {
     return [];
@@ -565,12 +599,22 @@ function renderQuestionList({
                 ${hasActiveFilters ? '<a class="btn btn-outline-secondary" href="/questions">Reset</a>' : ''}
               </div>
             </form>
-            <div class="table-responsive">
+            <div class="table-responsive" data-selection-root data-total-questions="${escapeHtml(String(totalQuestions))}">
               <table class="table table-striped align-middle">
                 <thead>
                   <tr>
                     <th scope="col" class="text-center">
-                      <input class="form-check-input" type="checkbox" aria-label="Select all questions" data-select-all>
+                      <div class="d-flex flex-column align-items-center gap-1">
+                        <div class="form-check mb-0">
+                          <input class="form-check-input" type="checkbox" aria-label="Toggle question selection" data-select-master>
+                        </div>
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Selection scope">
+                          <input type="radio" class="btn-check" name="selection_scope" id="selection_scope_page" value="page" autocomplete="off" form="exportForm" data-selection-scope checked>
+                          <label class="btn btn-outline-secondary btn-sm" for="selection_scope_page">Select page</label>
+                          <input type="radio" class="btn-check" name="selection_scope" id="selection_scope_all" value="all" autocomplete="off" form="exportForm" data-selection-scope>
+                          <label class="btn btn-outline-secondary btn-sm" for="selection_scope_all">Select all</label>
+                        </div>
+                      </div>
                     </th>
                     <th scope="col">Question</th>
                     <th scope="col">Domain</th>
@@ -582,6 +626,10 @@ function renderQuestionList({
                 </tbody>
               </table>
             </div>
+            <input type="hidden" name="select_all_pages" value="0" form="exportForm" data-select-all-input>
+            <div class="alert alert-info mt-3 d-none" role="status" data-selection-notice>
+              All ${escapeHtml(String(totalQuestions))} questions matching the current filters are selected.
+            </div>
             <input type="hidden" name="page" value="${escapeHtml(String(page))}" form="exportForm">
             ${filterDomain ? `<input type="hidden" name="domain" value="${escapeHtml(filterDomain)}" form="exportForm">` : ''}
             ${filterSearch ? `<input type="hidden" name="q" value="${escapeHtml(filterSearch)}" form="exportForm">` : ''}
@@ -592,40 +640,184 @@ function renderQuestionList({
     </div>
     <script>
       document.addEventListener('DOMContentLoaded', () => {
-        const selectAll = document.querySelector('[data-select-all]');
+        const selectionRoot = document.querySelector('[data-selection-root]');
+        const masterCheckbox = document.querySelector('[data-select-master]');
         const itemCheckboxes = Array.from(document.querySelectorAll('[data-select-item]'));
+        const selectionScopeRadios = Array.from(document.querySelectorAll('[data-selection-scope]'));
+        const selectAllPagesInput = document.querySelector('[data-select-all-input]');
+        const selectionNotice = document.querySelector('[data-selection-notice]');
         const bulkDeleteButton = document.querySelector('[data-bulk-delete]');
-        const updateState = () => {
-          const checkedCount = itemCheckboxes.filter((checkbox) => checkbox.checked).length;
-          if (selectAll) {
-            selectAll.disabled = itemCheckboxes.length === 0;
-            selectAll.indeterminate = checkedCount > 0 && checkedCount < itemCheckboxes.length;
-            selectAll.checked = itemCheckboxes.length > 0 && checkedCount === itemCheckboxes.length;
+        const totalQuestions = selectionRoot
+          ? Number.parseInt(selectionRoot.getAttribute('data-total-questions') || '0', 10)
+          : 0;
+        const getScope = () => {
+          const active = selectionScopeRadios.find((radio) => radio.checked && !radio.disabled);
+          return active ? active.value : 'page';
+        };
+        const ensureControlsAvailability = () => {
+          const hasItems = itemCheckboxes.length > 0;
+          if (masterCheckbox) {
+            masterCheckbox.disabled = !hasItems;
+            if (!hasItems) {
+              masterCheckbox.checked = false;
+              masterCheckbox.indeterminate = false;
+            }
           }
-          if (bulkDeleteButton) {
+          selectionScopeRadios.forEach((radio) => {
+            radio.disabled = !hasItems;
+          });
+        };
+        const updateNotice = (scope) => {
+          if (!selectionNotice) {
+            return;
+          }
+          const selectAllActive = scope === 'all' && selectAllPagesInput && selectAllPagesInput.value === '1';
+          if (selectAllActive && totalQuestions > 0) {
+            selectionNotice.textContent =
+              totalQuestions === 1
+                ? 'All 1 question matching the current filters is selected.'
+                : 'All ' + totalQuestions + ' questions matching the current filters are selected.';
+            selectionNotice.classList.remove('d-none');
+          } else {
+            selectionNotice.classList.add('d-none');
+          }
+        };
+        const updateBulkDeleteState = (scope) => {
+          if (!bulkDeleteButton) {
+            return;
+          }
+          if (!itemCheckboxes.length) {
+            bulkDeleteButton.disabled = true;
+            return;
+          }
+          if (scope === 'all') {
+            bulkDeleteButton.disabled = !(selectAllPagesInput && selectAllPagesInput.value === '1');
+          } else {
+            const checkedCount = itemCheckboxes.filter((checkbox) => checkbox.checked).length;
             bulkDeleteButton.disabled = checkedCount === 0;
           }
         };
-        if (selectAll) {
-          selectAll.addEventListener('change', () => {
+        const updateMasterState = (scope) => {
+          if (!masterCheckbox) {
+            return;
+          }
+          if (scope === 'all') {
+            masterCheckbox.indeterminate = false;
+            masterCheckbox.checked = Boolean(selectAllPagesInput && selectAllPagesInput.value === '1');
+          } else {
+            const checkedCount = itemCheckboxes.filter((checkbox) => checkbox.checked).length;
+            const total = itemCheckboxes.length;
+            masterCheckbox.indeterminate = checkedCount > 0 && checkedCount < total;
+            masterCheckbox.checked = total > 0 && checkedCount === total;
+          }
+        };
+        const updateState = () => {
+          const scope = getScope();
+          if (scope === 'all' && selectAllPagesInput && selectAllPagesInput.value === '1') {
             itemCheckboxes.forEach((checkbox) => {
-              checkbox.checked = Boolean(selectAll.checked);
+              checkbox.checked = true;
             });
+          }
+          updateMasterState(scope);
+          updateNotice(scope);
+          updateBulkDeleteState(scope);
+        };
+        ensureControlsAvailability();
+        updateState();
+        if (masterCheckbox) {
+          masterCheckbox.addEventListener('change', () => {
+            const scope = getScope();
+            if (scope === 'all') {
+              if (selectAllPagesInput) {
+                selectAllPagesInput.value = masterCheckbox.checked ? '1' : '0';
+              }
+              if (!masterCheckbox.checked) {
+                itemCheckboxes.forEach((checkbox) => {
+                  checkbox.checked = false;
+                });
+              } else {
+                itemCheckboxes.forEach((checkbox) => {
+                  checkbox.checked = true;
+                });
+              }
+            } else {
+              itemCheckboxes.forEach((checkbox) => {
+                checkbox.checked = masterCheckbox.checked;
+              });
+            }
             updateState();
           });
         }
         itemCheckboxes.forEach((checkbox) => {
-          checkbox.addEventListener('change', updateState);
+          checkbox.addEventListener('change', () => {
+            const scope = getScope();
+            if (scope === 'all' && !checkbox.checked && selectAllPagesInput) {
+              const pageRadio = selectionScopeRadios.find((radio) => radio.value === 'page' && !radio.disabled);
+              if (pageRadio) {
+                pageRadio.checked = true;
+              }
+              selectAllPagesInput.value = '0';
+            }
+            updateState();
+          });
+        });
+        selectionScopeRadios.forEach((radio) => {
+          radio.addEventListener('change', () => {
+            if (!radio.checked) {
+              return;
+            }
+            if (!selectAllPagesInput) {
+              updateState();
+              return;
+            }
+            if (radio.value === 'all') {
+              selectAllPagesInput.value = masterCheckbox && masterCheckbox.checked ? '1' : '0';
+              if (selectAllPagesInput.value === '1') {
+                itemCheckboxes.forEach((checkbox) => {
+                  checkbox.checked = true;
+                });
+              }
+            } else {
+              selectAllPagesInput.value = '0';
+            }
+            updateState();
+          });
         });
         const exportForm = document.getElementById('exportForm');
         if (exportForm) {
           exportForm.addEventListener('submit', (event) => {
             const submitter = event.submitter;
+            const scope = getScope();
+            const usingAllScope = scope === 'all' && selectAllPagesInput && selectAllPagesInput.value === '1';
+            const hasPageSelection = itemCheckboxes.some((checkbox) => checkbox.checked);
             if (submitter && submitter.matches('[data-bulk-delete]')) {
-              if (!window.confirm('Delete the selected questions? This action cannot be undone.')) {
+              if (!usingAllScope && !hasPageSelection) {
+                event.preventDefault();
+                window.alert('Select at least one question to delete.');
+                return;
+              }
+              if (usingAllScope && totalQuestions === 0) {
+                event.preventDefault();
+                window.alert('No questions match the current filters to delete.');
+                return;
+              }
+              const message = usingAllScope
+                ? 'Delete all questions that match the current filters? This action cannot be undone.'
+                : 'Delete the selected questions? This action cannot be undone.';
+              if (!window.confirm(message)) {
                 event.preventDefault();
                 return;
               }
+            }
+            if (
+              submitter &&
+              submitter.name === 'export_mode' &&
+              submitter.value === 'selected' &&
+              !usingAllScope &&
+              !hasPageSelection
+            ) {
+              event.preventDefault();
+              window.alert('Select at least one question before exporting.');
             }
           });
         }
@@ -1121,20 +1313,7 @@ const server = http.createServer(async (req, res) => {
       const perPage = 10;
       const domainFilter = (requestUrl.searchParams.get('domain') || '').trim();
       const searchFilter = (requestUrl.searchParams.get('q') || '').trim();
-      const searchLower = searchFilter.toLowerCase();
-      const filtered = questions.filter((question) => {
-        const questionDomain = (question.domain || 'General').trim();
-        if (domainFilter && questionDomain !== domainFilter) {
-          return false;
-        }
-        if (searchFilter) {
-          const haystack = `${question.question || ''} ${question.comment || ''}`.toLowerCase();
-          if (!haystack.includes(searchLower)) {
-            return false;
-          }
-        }
-        return true;
-      });
+      const filtered = filterQuestionsByParams(questions, domainFilter, searchFilter);
       const totalQuestions = filtered.length;
       const totalPages = Math.max(1, Math.ceil(Math.max(totalQuestions, 1) / perPage));
       const requestedPage = Number.parseInt(requestUrl.searchParams.get('page') || '1', 10);
@@ -1168,20 +1347,35 @@ const server = http.createServer(async (req, res) => {
       const bodyBuffer = await collectRequestBody(req);
       const formData = new URLSearchParams(bodyBuffer.toString());
       const exportMode = formData.get('export_mode') || 'selected';
+      const pageParam = Number.parseInt(formData.get('page') || '1', 10);
+      const domainFilter = (formData.get('domain') || '').trim();
+      const searchFilter = (formData.get('q') || '').trim();
+      const selectionScope = formData.get('selection_scope') || 'page';
+      const selectAllPages = formData.get('select_all_pages') === '1';
+      const redirectUrl = buildQuestionRedirectUrl(pageParam, domainFilter, searchFilter);
       const selectedIds = formData.getAll('selected').filter((value) => value);
       let exportData = questions;
       if (exportMode === 'selected') {
-        if (!selectedIds.length) {
-          addFlash(session, 'warning', 'Select at least one question to export or choose “Export all”.');
-          redirect(res, '/questions');
-          return;
-        }
-        const idSet = new Set(selectedIds);
-        exportData = questions.filter((question) => idSet.has(question.id));
-        if (!exportData.length) {
-          addFlash(session, 'warning', 'No matching questions were found for the selected items.');
-          redirect(res, '/questions');
-          return;
+        if (selectionScope === 'all' && selectAllPages) {
+          exportData = filterQuestionsByParams(questions, domainFilter, searchFilter);
+          if (!exportData.length) {
+            addFlash(session, 'warning', 'No questions match the current filters to export.');
+            redirect(res, redirectUrl);
+            return;
+          }
+        } else {
+          if (!selectedIds.length) {
+            addFlash(session, 'warning', 'Select at least one question to export or choose “Export all”.');
+            redirect(res, redirectUrl);
+            return;
+          }
+          const idSet = new Set(selectedIds);
+          exportData = questions.filter((question) => idSet.has(question.id));
+          if (!exportData.length) {
+            addFlash(session, 'warning', 'No matching questions were found for the selected items.');
+            redirect(res, redirectUrl);
+            return;
+          }
         }
       }
       const payload = JSON.stringify(exportData, null, 2);
@@ -1343,15 +1537,37 @@ const server = http.createServer(async (req, res) => {
       const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 1;
       const domainFilter = (formData.get('domain') || '').trim();
       const searchFilter = (formData.get('q') || '').trim();
-      const redirectParams = new URLSearchParams();
-      if (domainFilter) {
-        redirectParams.set('domain', domainFilter);
+      const selectionScope = formData.get('selection_scope') || 'page';
+      const selectAllPages = formData.get('select_all_pages') === '1';
+      const redirectUrl = buildQuestionRedirectUrl(page, domainFilter, searchFilter);
+      if (selectionScope === 'all' && selectAllPages) {
+        const filtered = filterQuestionsByParams(questions, domainFilter, searchFilter);
+        if (!filtered.length) {
+          addFlash(session, 'warning', 'No questions match the current filters to delete.');
+          redirect(res, redirectUrl);
+          return;
+        }
+        const filteredIds = new Set(filtered.map((question) => question.id));
+        const remainingQuestions = questions.filter((question) => !filteredIds.has(question.id));
+        const removedCount = filteredIds.size;
+        if (!removedCount) {
+          addFlash(session, 'warning', 'No questions match the current filters to delete.');
+          redirect(res, redirectUrl);
+          return;
+        }
+        writeJson(QUESTIONS_FILE, remainingQuestions);
+        const remainingWrongAnswers = wrongAnswers.filter((item) => !filteredIds.has(item.question_id));
+        if (remainingWrongAnswers.length !== wrongAnswers.length) {
+          saveWrongAnswers(remainingWrongAnswers);
+        }
+        addFlash(
+          session,
+          'success',
+          removedCount === 1 ? 'Deleted 1 question.' : `Deleted ${removedCount} questions.`,
+        );
+        redirect(res, redirectUrl);
+        return;
       }
-      if (searchFilter) {
-        redirectParams.set('q', searchFilter);
-      }
-      redirectParams.set('page', String(page));
-      const redirectUrl = redirectParams.toString() ? `/questions?${redirectParams.toString()}` : '/questions';
       if (!selectedIds.length) {
         addFlash(session, 'warning', 'Select at least one question to delete.');
         redirect(res, redirectUrl);
