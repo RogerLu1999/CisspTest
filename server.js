@@ -610,11 +610,11 @@ function renderQuestionList({
                         </div>
                         <div class="d-flex flex-column align-items-center gap-1" role="group" aria-label="Selection scope">
                           <div class="form-check mb-0">
-                            <input type="radio" class="form-check-input" name="selection_scope" id="selection_scope_page" value="page" autocomplete="off" form="exportForm" data-selection-scope checked>
-                            <label class="form-check-label small" for="selection_scope_page">Select page</label>
+                            <input type="checkbox" class="form-check-input" id="selection_scope_page" value="page" autocomplete="off" form="exportForm" data-selection-scope checked>
+                            <label class="form-check-label small" for="selection_scope_page">Select current page</label>
                           </div>
                           <div class="form-check mb-0">
-                            <input type="radio" class="form-check-input" name="selection_scope" id="selection_scope_all" value="all" autocomplete="off" form="exportForm" data-selection-scope>
+                            <input type="checkbox" class="form-check-input" id="selection_scope_all" value="all" autocomplete="off" form="exportForm" data-selection-scope>
                             <label class="form-check-label small" for="selection_scope_all">Select all</label>
                           </div>
                         </div>
@@ -647,7 +647,7 @@ function renderQuestionList({
         const selectionRoot = document.querySelector('[data-selection-root]');
         const masterCheckbox = document.querySelector('[data-select-master]');
         const itemCheckboxes = Array.from(document.querySelectorAll('[data-select-item]'));
-        const selectionScopeRadios = Array.from(document.querySelectorAll('[data-selection-scope]'));
+        const selectionScopeCheckboxes = Array.from(document.querySelectorAll('[data-selection-scope]'));
         const selectAllPagesInput = document.querySelector('[data-select-all-input]');
         const selectionNotice = document.querySelector('[data-selection-notice]');
         const bulkDeleteButton = document.querySelector('[data-bulk-delete]');
@@ -656,7 +656,7 @@ function renderQuestionList({
           : 0;
         const bulkDeleteLabelBase = bulkDeleteButton ? bulkDeleteButton.textContent.trim() || 'Delete selected' : 'Delete selected';
         const getScope = () => {
-          const active = selectionScopeRadios.find((radio) => radio.checked && !radio.disabled);
+          const active = selectionScopeCheckboxes.find((checkbox) => checkbox.checked && !checkbox.disabled);
           return active ? active.value : 'page';
         };
         const getSelectedCount = (scope) => {
@@ -674,8 +674,8 @@ function renderQuestionList({
               masterCheckbox.indeterminate = false;
             }
           }
-          selectionScopeRadios.forEach((radio) => {
-            radio.disabled = !hasItems;
+          selectionScopeCheckboxes.forEach((checkbox) => {
+            checkbox.disabled = !hasItems;
           });
         };
         const updateNotice = (scope) => {
@@ -769,29 +769,44 @@ function renderQuestionList({
           checkbox.addEventListener('change', () => {
             const scope = getScope();
             if (scope === 'all' && !checkbox.checked && selectAllPagesInput) {
-              const pageRadio = selectionScopeRadios.find((radio) => radio.value === 'page' && !radio.disabled);
-              if (pageRadio) {
-                pageRadio.checked = true;
+              const pageCheckbox = selectionScopeCheckboxes.find((checkbox) => checkbox.value === 'page' && !checkbox.disabled);
+              if (pageCheckbox) {
+                pageCheckbox.checked = true;
+                selectionScopeCheckboxes.forEach((other) => {
+                  if (other !== pageCheckbox) {
+                    other.checked = false;
+                  }
+                });
               }
               selectAllPagesInput.value = '0';
             }
             updateState();
           });
         });
-        selectionScopeRadios.forEach((radio) => {
-          radio.addEventListener('change', () => {
-            if (!radio.checked) {
+        selectionScopeCheckboxes.forEach((checkbox) => {
+          checkbox.addEventListener('change', () => {
+            if (!checkbox.checked) {
+              const stillChecked = selectionScopeCheckboxes.some((input) => input.checked);
+              if (!stillChecked) {
+                checkbox.checked = true;
+              }
+              updateState();
               return;
             }
+            selectionScopeCheckboxes.forEach((other) => {
+              if (other !== checkbox) {
+                other.checked = false;
+              }
+            });
             if (!selectAllPagesInput) {
               updateState();
               return;
             }
-            if (radio.value === 'all') {
+            if (checkbox.value === 'all') {
               selectAllPagesInput.value = masterCheckbox && masterCheckbox.checked ? '1' : '0';
               if (selectAllPagesInput.value === '1') {
-                itemCheckboxes.forEach((checkbox) => {
-                  checkbox.checked = true;
+                itemCheckboxes.forEach((itemCheckbox) => {
+                  itemCheckbox.checked = true;
                 });
               }
             } else {
