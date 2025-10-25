@@ -599,27 +599,22 @@ function renderQuestionList({
                 ${hasActiveFilters ? '<a class="btn btn-outline-secondary" href="/questions">Reset</a>' : ''}
               </div>
             </form>
+            <div class="d-flex flex-wrap align-items-center gap-3 mb-2" role="group" aria-label="Question selection controls">
+              <div class="form-check form-check-inline mb-0">
+                <input type="checkbox" class="form-check-input" id="selection_scope_page" autocomplete="off" data-selection-control="page">
+                <label class="form-check-label" for="selection_scope_page">Select current page</label>
+              </div>
+              <div class="form-check form-check-inline mb-0">
+                <input type="checkbox" class="form-check-input" id="selection_scope_all" autocomplete="off" data-selection-control="all">
+                <label class="form-check-label" for="selection_scope_all">Select all</label>
+              </div>
+            </div>
+            <input type="hidden" name="selection_scope" value="page" form="exportForm" data-selection-scope-input>
             <div class="table-responsive" data-selection-root data-total-questions="${escapeHtml(String(totalQuestions))}">
               <table class="table table-striped align-middle">
                 <thead>
                   <tr>
-                    <th scope="col" class="text-center">
-                      <div class="d-flex flex-column align-items-center gap-1">
-                        <div class="form-check mb-0">
-                          <input class="form-check-input" type="checkbox" aria-label="Toggle question selection" data-select-master>
-                        </div>
-                        <div class="d-flex flex-column align-items-center gap-1" role="group" aria-label="Selection scope">
-                          <div class="form-check mb-0">
-                            <input type="checkbox" class="form-check-input" id="selection_scope_page" value="page" autocomplete="off" form="exportForm" data-selection-scope checked>
-                            <label class="form-check-label small" for="selection_scope_page">Select current page</label>
-                          </div>
-                          <div class="form-check mb-0">
-                            <input type="checkbox" class="form-check-input" id="selection_scope_all" value="all" autocomplete="off" form="exportForm" data-selection-scope>
-                            <label class="form-check-label small" for="selection_scope_all">Select all</label>
-                          </div>
-                        </div>
-                      </div>
-                    </th>
+                    <th scope="col" class="text-center" style="width: 3.5rem;">Select</th>
                     <th scope="col">Question</th>
                     <th scope="col">Domain</th>
                     <th scope="col" class="text-nowrap">Actions</th>
@@ -645,45 +640,75 @@ function renderQuestionList({
     <script>
       document.addEventListener('DOMContentLoaded', () => {
         const selectionRoot = document.querySelector('[data-selection-root]');
-        const masterCheckbox = document.querySelector('[data-select-master]');
         const itemCheckboxes = Array.from(document.querySelectorAll('[data-select-item]'));
-        const selectionScopeCheckboxes = Array.from(document.querySelectorAll('[data-selection-scope]'));
+        const selectionControls = Array.from(document.querySelectorAll('[data-selection-control]'));
         const selectAllPagesInput = document.querySelector('[data-select-all-input]');
+        const selectionScopeInput = document.querySelector('[data-selection-scope-input]');
         const selectionNotice = document.querySelector('[data-selection-notice]');
         const bulkDeleteButton = document.querySelector('[data-bulk-delete]');
         const totalQuestions = selectionRoot
           ? Number.parseInt(selectionRoot.getAttribute('data-total-questions') || '0', 10)
           : 0;
         const bulkDeleteLabelBase = bulkDeleteButton ? bulkDeleteButton.textContent.trim() || 'Delete selected' : 'Delete selected';
-        const getScope = () => {
-          const active = selectionScopeCheckboxes.find((checkbox) => checkbox.checked && !checkbox.disabled);
-          return active ? active.value : 'page';
-        };
-        const getSelectedCount = (scope) => {
-          if (scope === 'all') {
-            return selectAllPagesInput && selectAllPagesInput.value === '1' ? totalQuestions : 0;
+        const controlPage = selectionControls.find((control) => control.getAttribute('data-selection-control') === 'page');
+        const controlAll = selectionControls.find((control) => control.getAttribute('data-selection-control') === 'all');
+        const isAllScopeActive = () => selectAllPagesInput && selectAllPagesInput.value === '1';
+        const getSelectedCount = () => {
+          if (isAllScopeActive()) {
+            return totalQuestions;
           }
           return itemCheckboxes.filter((checkbox) => checkbox.checked).length;
         };
+        const setScopeValue = (value) => {
+          if (selectionScopeInput) {
+            selectionScopeInput.value = value;
+          }
+        };
         const ensureControlsAvailability = () => {
           const hasItems = itemCheckboxes.length > 0;
-          if (masterCheckbox) {
-            masterCheckbox.disabled = !hasItems;
+          selectionControls.forEach((control) => {
+            control.disabled = !hasItems;
             if (!hasItems) {
-              masterCheckbox.checked = false;
-              masterCheckbox.indeterminate = false;
+              control.checked = false;
             }
-          }
-          selectionScopeCheckboxes.forEach((checkbox) => {
-            checkbox.disabled = !hasItems;
           });
+          if (!hasItems && selectAllPagesInput) {
+            selectAllPagesInput.value = '0';
+          }
+          if (!hasItems) {
+            setScopeValue('page');
+          }
         };
-        const updateNotice = (scope) => {
+        const updateControlsFromState = () => {
+          const hasItems = itemCheckboxes.length > 0;
+          if (!hasItems) {
+            return;
+          }
+          if (isAllScopeActive()) {
+            setScopeValue('all');
+            if (controlAll) {
+              controlAll.checked = true;
+            }
+            if (controlPage) {
+              controlPage.checked = false;
+            }
+            return;
+          }
+          setScopeValue('page');
+          const total = itemCheckboxes.length;
+          const checkedCount = itemCheckboxes.filter((checkbox) => checkbox.checked).length;
+          if (controlAll) {
+            controlAll.checked = false;
+          }
+          if (controlPage) {
+            controlPage.checked = checkedCount === total && total > 0;
+          }
+        };
+        const updateNotice = () => {
           if (!selectionNotice) {
             return;
           }
-          const selectAllActive = scope === 'all' && selectAllPagesInput && selectAllPagesInput.value === '1';
-          if (selectAllActive && totalQuestions > 0) {
+          if (isAllScopeActive() && totalQuestions > 0) {
             selectionNotice.textContent =
               totalQuestions === 1
                 ? 'All 1 question matching the current filters is selected.'
@@ -693,136 +718,83 @@ function renderQuestionList({
             selectionNotice.classList.add('d-none');
           }
         };
-        const updateBulkDeleteState = (scope) => {
+        const updateBulkDeleteState = () => {
           if (!bulkDeleteButton) {
             return;
           }
-          if (!itemCheckboxes.length) {
+          const hasItems = itemCheckboxes.length > 0;
+          if (!hasItems) {
             bulkDeleteButton.disabled = true;
             bulkDeleteButton.textContent = bulkDeleteLabelBase;
             return;
           }
-          const selectedCount = getSelectedCount(scope);
-          if (scope === 'all') {
-            bulkDeleteButton.disabled = selectedCount === 0;
-          } else {
-            bulkDeleteButton.disabled = selectedCount === 0;
-          }
+          const selectedCount = getSelectedCount();
+          bulkDeleteButton.disabled = selectedCount === 0;
           if (selectedCount > 0) {
             bulkDeleteButton.textContent = bulkDeleteLabelBase + ' (' + selectedCount + ')';
           } else {
             bulkDeleteButton.textContent = bulkDeleteLabelBase;
           }
         };
-        const updateMasterState = (scope) => {
-          if (!masterCheckbox) {
-            return;
-          }
-          if (scope === 'all') {
-            masterCheckbox.indeterminate = false;
-            masterCheckbox.checked = Boolean(selectAllPagesInput && selectAllPagesInput.value === '1');
-          } else {
-            const checkedCount = itemCheckboxes.filter((checkbox) => checkbox.checked).length;
-            const total = itemCheckboxes.length;
-            masterCheckbox.indeterminate = checkedCount > 0 && checkedCount < total;
-            masterCheckbox.checked = total > 0 && checkedCount === total;
-          }
-        };
         const updateState = () => {
-          const scope = getScope();
-          if (scope === 'all' && selectAllPagesInput && selectAllPagesInput.value === '1') {
-            itemCheckboxes.forEach((checkbox) => {
-              checkbox.checked = true;
-            });
-          }
-          updateMasterState(scope);
-          updateNotice(scope);
-          updateBulkDeleteState(scope);
+          updateControlsFromState();
+          updateNotice();
+          updateBulkDeleteState();
         };
         ensureControlsAvailability();
         updateState();
-        if (masterCheckbox) {
-          masterCheckbox.addEventListener('change', () => {
-            const scope = getScope();
-            if (scope === 'all') {
+        selectionControls.forEach((control) => {
+          control.addEventListener('change', () => {
+            if (control.disabled) {
+              return;
+            }
+            const type = control.getAttribute('data-selection-control');
+            const isChecked = control.checked;
+            if (type === 'all') {
               if (selectAllPagesInput) {
-                selectAllPagesInput.value = masterCheckbox.checked ? '1' : '0';
+                selectAllPagesInput.value = isChecked ? '1' : '0';
               }
-              if (!masterCheckbox.checked) {
-                itemCheckboxes.forEach((checkbox) => {
-                  checkbox.checked = false;
-                });
-              } else {
-                itemCheckboxes.forEach((checkbox) => {
-                  checkbox.checked = true;
-                });
+              if (controlPage && isChecked) {
+                controlPage.checked = false;
               }
+              setScopeValue(isChecked ? 'all' : 'page');
+            } else {
+              if (selectAllPagesInput) {
+                selectAllPagesInput.value = '0';
+              }
+              if (controlAll && isChecked) {
+                controlAll.checked = false;
+              }
+              setScopeValue('page');
+            }
+            if (isChecked) {
+              itemCheckboxes.forEach((checkbox) => {
+                checkbox.checked = true;
+              });
             } else {
               itemCheckboxes.forEach((checkbox) => {
-                checkbox.checked = masterCheckbox.checked;
+                checkbox.checked = false;
               });
             }
             updateState();
           });
-        }
-        itemCheckboxes.forEach((checkbox) => {
-          checkbox.addEventListener('change', () => {
-            const scope = getScope();
-            if (scope === 'all' && !checkbox.checked && selectAllPagesInput) {
-              const pageCheckbox = selectionScopeCheckboxes.find((checkbox) => checkbox.value === 'page' && !checkbox.disabled);
-              if (pageCheckbox) {
-                pageCheckbox.checked = true;
-                selectionScopeCheckboxes.forEach((other) => {
-                  if (other !== pageCheckbox) {
-                    other.checked = false;
-                  }
-                });
-              }
-              selectAllPagesInput.value = '0';
-            }
-            updateState();
-          });
         });
-        selectionScopeCheckboxes.forEach((checkbox) => {
-          checkbox.addEventListener('change', () => {
-            if (!checkbox.checked) {
-              const stillChecked = selectionScopeCheckboxes.some((input) => input.checked);
-              if (!stillChecked) {
-                checkbox.checked = true;
+          itemCheckboxes.forEach((checkbox) => {
+            checkbox.addEventListener('change', () => {
+              if (selectAllPagesInput && selectAllPagesInput.value === '1' && !checkbox.checked) {
+                selectAllPagesInput.value = '0';
+                setScopeValue('page');
               }
               updateState();
-              return;
-            }
-            selectionScopeCheckboxes.forEach((other) => {
-              if (other !== checkbox) {
-                other.checked = false;
-              }
             });
-            if (!selectAllPagesInput) {
-              updateState();
-              return;
-            }
-            if (checkbox.value === 'all') {
-              selectAllPagesInput.value = masterCheckbox && masterCheckbox.checked ? '1' : '0';
-              if (selectAllPagesInput.value === '1') {
-                itemCheckboxes.forEach((itemCheckbox) => {
-                  itemCheckbox.checked = true;
-                });
-              }
-            } else {
-              selectAllPagesInput.value = '0';
-            }
-            updateState();
           });
-        });
         const exportForm = document.getElementById('exportForm');
         if (exportForm) {
           exportForm.addEventListener('submit', (event) => {
             const submitter = event.submitter;
-            const scope = getScope();
-            const usingAllScope = scope === 'all' && selectAllPagesInput && selectAllPagesInput.value === '1';
+            const usingAllScope = isAllScopeActive();
             const hasPageSelection = itemCheckboxes.some((checkbox) => checkbox.checked);
-            const selectedCount = getSelectedCount(scope);
+            const selectedCount = getSelectedCount();
             if (submitter && submitter.matches('[data-bulk-delete]')) {
               if (!usingAllScope && !hasPageSelection) {
                 event.preventDefault();
