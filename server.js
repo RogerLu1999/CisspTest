@@ -487,7 +487,7 @@ function renderQuestionList({
       (question) => `
         <tr>
           <td class="text-center">
-            <input class="form-check-input" type="checkbox" name="selected" value="${escapeHtml(question.id)}" form="exportForm" aria-label="Select question">
+            <input class="form-check-input" type="checkbox" name="selected" value="${escapeHtml(question.id)}" form="exportForm" aria-label="Select question" data-select-item>
           </td>
           <td>${escapeHtml(question.question)}</td>
           <td>${escapeHtml(question.domain)}</td>
@@ -545,6 +545,7 @@ function renderQuestionList({
               <div class="d-flex gap-2 flex-wrap">
                 <button type="submit" class="btn btn-outline-primary" form="exportForm" name="export_mode" value="selected">Export selected</button>
                 <button type="submit" class="btn btn-outline-secondary" form="exportForm" name="export_mode" value="all">Export all</button>
+                <button type="submit" class="btn btn-outline-danger" form="exportForm" formaction="/questions/delete-bulk" formmethod="post" data-bulk-delete disabled>Delete selected</button>
               </div>
             </div>
             <form class="row g-3 align-items-end mb-4" method="get" action="/questions">
@@ -568,7 +569,9 @@ function renderQuestionList({
               <table class="table table-striped align-middle">
                 <thead>
                   <tr>
-                    <th scope="col" class="text-center">Select</th>
+                    <th scope="col" class="text-center">
+                      <input class="form-check-input" type="checkbox" aria-label="Select all questions" data-select-all>
+                    </th>
                     <th scope="col">Question</th>
                     <th scope="col">Domain</th>
                     <th scope="col" class="text-nowrap">Actions</th>
@@ -579,11 +582,56 @@ function renderQuestionList({
                 </tbody>
               </table>
             </div>
+            <input type="hidden" name="page" value="${escapeHtml(String(page))}" form="exportForm">
+            ${filterDomain ? `<input type="hidden" name="domain" value="${escapeHtml(filterDomain)}" form="exportForm">` : ''}
+            ${filterSearch ? `<input type="hidden" name="q" value="${escapeHtml(filterSearch)}" form="exportForm">` : ''}
             ${pagination}
           </div>
         </div>
       </div>
     </div>
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        const selectAll = document.querySelector('[data-select-all]');
+        const itemCheckboxes = Array.from(document.querySelectorAll('[data-select-item]'));
+        const bulkDeleteButton = document.querySelector('[data-bulk-delete]');
+        const updateState = () => {
+          const checkedCount = itemCheckboxes.filter((checkbox) => checkbox.checked).length;
+          if (selectAll) {
+            selectAll.disabled = itemCheckboxes.length === 0;
+            selectAll.indeterminate = checkedCount > 0 && checkedCount < itemCheckboxes.length;
+            selectAll.checked = itemCheckboxes.length > 0 && checkedCount === itemCheckboxes.length;
+          }
+          if (bulkDeleteButton) {
+            bulkDeleteButton.disabled = checkedCount === 0;
+          }
+        };
+        if (selectAll) {
+          selectAll.addEventListener('change', () => {
+            itemCheckboxes.forEach((checkbox) => {
+              checkbox.checked = Boolean(selectAll.checked);
+            });
+            updateState();
+          });
+        }
+        itemCheckboxes.forEach((checkbox) => {
+          checkbox.addEventListener('change', updateState);
+        });
+        const exportForm = document.getElementById('exportForm');
+        if (exportForm) {
+          exportForm.addEventListener('submit', (event) => {
+            const submitter = event.submitter;
+            if (submitter && submitter.matches('[data-bulk-delete]')) {
+              if (!window.confirm('Delete the selected questions? This action cannot be undone.')) {
+                event.preventDefault();
+                return;
+              }
+            }
+          });
+        }
+        updateState();
+      });
+    </script>
   `;
 }
 
@@ -1284,6 +1332,50 @@ const server = http.createServer(async (req, res) => {
       }
       addFlash(session, 'success', 'Question deleted.');
       redirect(res, `/questions?page=${page}`);
+      return;
+    }
+
+    if (pathname === '/questions/delete-bulk' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      const formData = new URLSearchParams(bodyBuffer.toString());
+      const selectedIds = formData.getAll('selected').filter((value) => value);
+      const pageParam = Number.parseInt(formData.get('page') || '1', 10);
+      const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 1;
+      const domainFilter = (formData.get('domain') || '').trim();
+      const searchFilter = (formData.get('q') || '').trim();
+      const redirectParams = new URLSearchParams();
+      if (domainFilter) {
+        redirectParams.set('domain', domainFilter);
+      }
+      if (searchFilter) {
+        redirectParams.set('q', searchFilter);
+      }
+      redirectParams.set('page', String(page));
+      const redirectUrl = redirectParams.toString() ? `/questions?${redirectParams.toString()}` : '/questions';
+      if (!selectedIds.length) {
+        addFlash(session, 'warning', 'Select at least one question to delete.');
+        redirect(res, redirectUrl);
+        return;
+      }
+      const idSet = new Set(selectedIds);
+      const remainingQuestions = questions.filter((question) => !idSet.has(question.id));
+      const removedCount = questions.length - remainingQuestions.length;
+      if (removedCount === 0) {
+        addFlash(session, 'warning', 'No matching questions were found for the selected items.');
+        redirect(res, redirectUrl);
+        return;
+      }
+      writeJson(QUESTIONS_FILE, remainingQuestions);
+      const remainingWrongAnswers = wrongAnswers.filter((item) => !idSet.has(item.question_id));
+      if (remainingWrongAnswers.length !== wrongAnswers.length) {
+        saveWrongAnswers(remainingWrongAnswers);
+      }
+      addFlash(
+        session,
+        'success',
+        removedCount === 1 ? 'Deleted 1 question.' : `Deleted ${removedCount} questions.`,
+      );
+      redirect(res, redirectUrl);
       return;
     }
 
