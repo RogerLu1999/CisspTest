@@ -151,6 +151,26 @@ function normalizeQuestion(rawQuestion) {
   };
 }
 
+function parseChoicesInput(value) {
+  if (!value) {
+    return [];
+  }
+  return value
+    .split(/\r?\n/)
+    .map((choice) => choice.trim())
+    .filter((choice) => choice);
+}
+
+function parseCorrectAnswersInput(value) {
+  if (!value) {
+    return [];
+  }
+  return value
+    .split(/[,\n]+/)
+    .map((item) => item.trim())
+    .filter((item) => item);
+}
+
 function importQuestions(rawData) {
   const existing = new Map();
   for (const question of readJson(QUESTIONS_FILE)) {
@@ -313,6 +333,9 @@ function renderLayout({ title, questionCount, wrongCount, domains, flashMessages
               <a class="nav-link" href="/import">Import Questions</a>
             </li>
             <li class="nav-item">
+              <a class="nav-link" href="/questions">Question Bank</a>
+            </li>
+            <li class="nav-item">
               <a class="nav-link" href="/test/new">New Test</a>
             </li>
             <li class="nav-item">
@@ -425,6 +448,178 @@ function renderImport() {
                 <div class="form-text">The importer accepts the same format as <code>sample_data/sample_questions.json</code>.</div>
               </div>
               <button type="submit" class="btn btn-primary">Import Questions</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderQuestionList({ questions, page, totalPages, perPage, totalQuestions }) {
+  const hasQuestions = totalQuestions > 0;
+  const start = hasQuestions ? (page - 1) * perPage + 1 : 0;
+  const end = hasQuestions ? Math.min(start + perPage - 1, totalQuestions) : 0;
+  const rows = questions
+    .map(
+      (question) => `
+        <tr>
+          <td>${escapeHtml(question.question)}</td>
+          <td>${escapeHtml(question.domain)}</td>
+          <td class="text-nowrap">
+            <a class="btn btn-sm btn-outline-secondary" href="/questions/view?id=${encodeURIComponent(question.id)}">View</a>
+            <a class="btn btn-sm btn-outline-primary" href="/questions/edit?id=${encodeURIComponent(question.id)}">Edit</a>
+            <form class="d-inline" method="post" action="/questions/delete">
+              <input type="hidden" name="id" value="${escapeHtml(question.id)}">
+              <input type="hidden" name="page" value="${page}">
+              <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Delete this question?');">Delete</button>
+            </form>
+          </td>
+        </tr>
+      `,
+    )
+    .join('\n');
+  const paginationItems = Array.from({ length: totalPages }, (_, index) => index + 1)
+    .map((number) => {
+      const activeClass = number === page ? ' active' : '';
+      return `<li class="page-item${activeClass}"><a class="page-link" href="/questions?page=${number}">${number}</a></li>`;
+    })
+    .join('\n');
+  const pagination =
+    totalPages > 1
+      ? `
+        <nav aria-label="Question pagination">
+          <ul class="pagination justify-content-center">
+            ${paginationItems}
+          </ul>
+        </nav>
+      `
+      : '';
+  return `
+    <div class="row justify-content-center">
+      <div class="col-lg-10">
+        <div class="card mb-3">
+          <div class="card-body">
+            <h5 class="card-title">Question Bank</h5>
+            <p class="card-text">${hasQuestions
+              ? `Showing ${escapeHtml(String(start))}–${escapeHtml(String(end))} of ${escapeHtml(String(totalQuestions))} questions.`
+              : 'No questions have been imported yet.'}</p>
+            <div class="table-responsive">
+              <table class="table table-striped align-middle">
+                <thead>
+                  <tr>
+                    <th scope="col">Question</th>
+                    <th scope="col">Domain</th>
+                    <th scope="col" class="text-nowrap">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rows || '<tr><td colspan="3" class="text-center text-muted">No questions imported yet.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+            ${pagination}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderQuestionView({ question }) {
+  const correctAnswers = Array.isArray(question.correct_answers) ? question.correct_answers : [];
+  const choices = Array.isArray(question.choices) ? question.choices : [];
+  const answerLabels = correctAnswers
+    .map((index) => {
+      const letter = String.fromCharCode(65 + index);
+      const choice = choices[index];
+      return `<li class="list-group-item"><strong>${escapeHtml(letter)}.</strong> ${escapeHtml(choice || '')}</li>`;
+    })
+    .join('\n');
+  const choiceItems = choices
+    .map((choice, index) => `<li class="list-group-item"><strong>${String.fromCharCode(65 + index)}.</strong> ${escapeHtml(choice)}</li>`)
+    .join('\n');
+  return `
+    <div class="row justify-content-center">
+      <div class="col-lg-8">
+        <div class="card mb-3">
+          <div class="card-body">
+            <h5 class="card-title">${escapeHtml(question.question)}</h5>
+            <p><strong>Domain:</strong> ${escapeHtml(question.domain)}</p>
+            ${question.comment ? `<p><strong>Comment:</strong> ${escapeHtml(question.comment)}</p>` : '<p class="text-muted">No comment provided.</p>'}
+            <h6>Choices</h6>
+            <ul class="list-group list-group-flush mb-3">
+              ${choiceItems}
+            </ul>
+            <h6>Correct Answers</h6>
+            <ul class="list-group list-group-flush mb-3">
+              ${answerLabels}
+            </ul>
+            <div class="d-flex gap-2">
+              <a class="btn btn-outline-primary" href="/questions/edit?id=${encodeURIComponent(question.id)}">Edit</a>
+              <a class="btn btn-secondary" href="/questions">Back to list</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderQuestionForm({ question, errors }) {
+  const errorAlert = (errors && errors.length)
+    ? `
+        <div class="alert alert-danger" role="alert">
+          <ul class="mb-0">
+            ${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join('\n')}
+          </ul>
+        </div>
+      `
+    : '';
+  const choicesArray = Array.isArray(question.choices) ? question.choices : [];
+  const choicesText =
+    question.raw_choices !== undefined ? question.raw_choices : choicesArray.join('\n');
+  const correctAnswersValue =
+    question.raw_correct_answers !== undefined
+      ? question.raw_correct_answers
+      : (Array.isArray(question.correct_answers) ? question.correct_answers : [])
+          .map((index) => String.fromCharCode(65 + index))
+          .join(', ');
+  return `
+    <div class="row justify-content-center">
+      <div class="col-lg-8">
+        <div class="card">
+          <div class="card-body">
+            <h5 class="card-title">Edit question</h5>
+            <p class="card-text">Update the question text, domain, choices, and correct answers. Enter one choice per line and identify correct answers using letters or indices (for example, <code>A</code> or <code>0</code>).</p>
+            ${errorAlert}
+            <form method="post" action="/questions/edit">
+              <input type="hidden" name="id" value="${escapeHtml(question.id)}">
+              <div class="mb-3">
+                <label for="question_text" class="form-label">Question</label>
+                <textarea class="form-control" id="question_text" name="question_text" rows="3" required>${escapeHtml(question.question)}</textarea>
+              </div>
+              <div class="mb-3">
+                <label for="domain" class="form-label">Domain</label>
+                <input type="text" class="form-control" id="domain" name="domain" value="${escapeHtml(question.domain)}" required>
+              </div>
+              <div class="mb-3">
+                <label for="choices" class="form-label">Choices <span class="text-muted">(one per line)</span></label>
+                <textarea class="form-control" id="choices" name="choices" rows="6" required>${escapeHtml(choicesText)}</textarea>
+              </div>
+              <div class="mb-3">
+                <label for="correct_answers" class="form-label">Correct Answers</label>
+                <input type="text" class="form-control" id="correct_answers" name="correct_answers" value="${escapeHtml(correctAnswersValue)}" required>
+                <div class="form-text">Use letters (A, B, C) or indices (0, 1, 2). Separate multiple answers with commas.</div>
+              </div>
+              <div class="mb-3">
+                <label for="comment" class="form-label">Comment</label>
+                <textarea class="form-control" id="comment" name="comment" rows="3">${escapeHtml(question.comment || '')}</textarea>
+              </div>
+              <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-primary">Save Changes</button>
+                <a class="btn btn-secondary" href="/questions/view?id=${encodeURIComponent(question.id)}">Cancel</a>
+              </div>
             </form>
           </div>
         </div>
@@ -754,6 +949,172 @@ const server = http.createServer(async (req, res) => {
     const questions = readJson(QUESTIONS_FILE);
     const wrongAnswers = loadWrongAnswers();
     const domains = Array.from(new Set(questions.map((q) => q.domain || 'General'))).sort();
+
+    if (pathname === '/questions' && req.method === 'GET') {
+      const perPage = 10;
+      const totalQuestions = questions.length;
+      const totalPages = Math.max(1, Math.ceil(Math.max(totalQuestions, 1) / perPage));
+      const requestedPage = Number.parseInt(requestUrl.searchParams.get('page') || '1', 10);
+      const page = Number.isFinite(requestedPage) && requestedPage >= 1 ? Math.min(requestedPage, totalPages) : 1;
+      const startIndex = (page - 1) * perPage;
+      const pageItems = questions.slice(startIndex, startIndex + perPage);
+      const body = renderQuestionList({ questions: pageItems, page, totalPages, perPage, totalQuestions });
+      sendHtml(
+        res,
+        renderLayout({
+          title: 'Question Bank · CISSP Test Simulator',
+          questionCount: questions.length,
+          wrongCount: wrongAnswers.length,
+          domains,
+          flashMessages,
+          body,
+        }),
+      );
+      return;
+    }
+
+    if (pathname === '/questions/view' && req.method === 'GET') {
+      const id = requestUrl.searchParams.get('id') || '';
+      const question = questions.find((item) => item.id === id);
+      if (!question) {
+        addFlash(session, 'warning', 'Question not found.');
+        redirect(res, '/questions');
+        return;
+      }
+      const body = renderQuestionView({ question });
+      sendHtml(
+        res,
+        renderLayout({
+          title: 'View Question · CISSP Test Simulator',
+          questionCount: questions.length,
+          wrongCount: wrongAnswers.length,
+          domains,
+          flashMessages,
+          body,
+        }),
+      );
+      return;
+    }
+
+    if (pathname === '/questions/edit' && req.method === 'GET') {
+      const id = requestUrl.searchParams.get('id') || '';
+      const question = questions.find((item) => item.id === id);
+      if (!question) {
+        addFlash(session, 'warning', 'Question not found.');
+        redirect(res, '/questions');
+        return;
+      }
+      const body = renderQuestionForm({ question, errors: [] });
+      sendHtml(
+        res,
+        renderLayout({
+          title: 'Edit Question · CISSP Test Simulator',
+          questionCount: questions.length,
+          wrongCount: wrongAnswers.length,
+          domains,
+          flashMessages,
+          body,
+        }),
+      );
+      return;
+    }
+
+    if (pathname === '/questions/edit' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      const formData = new URLSearchParams(bodyBuffer.toString());
+      const id = formData.get('id') || '';
+      const index = questions.findIndex((item) => item.id === id);
+      if (index === -1) {
+        addFlash(session, 'warning', 'Question not found.');
+        redirect(res, '/questions');
+        return;
+      }
+      const questionText = (formData.get('question_text') || '').trim();
+      const domain = (formData.get('domain') || '').trim() || 'General';
+      const choicesInput = formData.get('choices') || '';
+      const choices = parseChoicesInput(choicesInput);
+      const correctRawInput = formData.get('correct_answers') || '';
+      const correctTokens = parseCorrectAnswersInput(correctRawInput);
+      const normalizedCorrect = normalizeCorrectAnswers(correctTokens, choices);
+      const comment = (formData.get('comment') || '').trim();
+      const errors = [];
+      if (!questionText) {
+        errors.push('Question text is required.');
+      }
+      if (choices.length < 2) {
+        errors.push('Provide at least two choices.');
+      }
+      if (!normalizedCorrect.length) {
+        errors.push('Specify at least one correct answer.');
+      }
+      if (errors.length) {
+        const draft = {
+          ...questions[index],
+          question: questionText,
+          domain,
+          choices,
+          correct_answers: normalizedCorrect,
+          comment,
+          raw_choices: choicesInput,
+          raw_correct_answers: correctRawInput,
+        };
+        const body = renderQuestionForm({ question: draft, errors });
+        sendHtml(
+          res,
+          renderLayout({
+            title: 'Edit Question · CISSP Test Simulator',
+            questionCount: questions.length,
+            wrongCount: wrongAnswers.length,
+            domains,
+            flashMessages,
+            body,
+          }),
+        );
+        return;
+      }
+      const updated = {
+        ...questions[index],
+        question: questionText,
+        domain,
+        choices,
+        correct_answers: normalizedCorrect,
+        comment,
+      };
+      questions[index] = updated;
+      writeJson(QUESTIONS_FILE, questions);
+      addFlash(session, 'success', 'Question updated successfully.');
+      redirect(res, `/questions/view?id=${encodeURIComponent(id)}`);
+      return;
+    }
+
+    if (pathname === '/questions/delete' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      const formData = new URLSearchParams(bodyBuffer.toString());
+      const id = formData.get('id') || '';
+      const pageParam = Number.parseInt(formData.get('page') || '1', 10);
+      const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 1;
+      const index = questions.findIndex((item) => item.id === id);
+      if (index === -1) {
+        addFlash(session, 'warning', 'Question not found.');
+        redirect(res, `/questions?page=${page}`);
+        return;
+      }
+      questions.splice(index, 1);
+      writeJson(QUESTIONS_FILE, questions);
+      let wrongModified = false;
+      for (let i = wrongAnswers.length - 1; i >= 0; i -= 1) {
+        if (wrongAnswers[i] && wrongAnswers[i].question_id === id) {
+          wrongAnswers.splice(i, 1);
+          wrongModified = true;
+        }
+      }
+      if (wrongModified) {
+        saveWrongAnswers(wrongAnswers);
+      }
+      addFlash(session, 'success', 'Question deleted.');
+      redirect(res, `/questions?page=${page}`);
+      return;
+    }
 
     if (req.method === 'GET' && pathname === '/') {
       const wrongDetails = wrongAnswers.map((item) => ({
