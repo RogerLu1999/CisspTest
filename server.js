@@ -440,12 +440,17 @@ function renderImport() {
         <div class="card">
           <div class="card-body">
             <h5 class="card-title">Import questions</h5>
-            <p class="card-text">Paste a JSON array (or an object with a <code>questions</code> list) containing your CISSP-style questions. Each entry should include the prompt, choices, and the correct answer(s).</p>
-            <form method="post">
+            <p class="card-text">Paste your questions as JSON or upload a JSON file. Each entry should include the prompt, choices, and the correct answer(s).</p>
+            <form method="post" enctype="multipart/form-data">
               <div class="mb-3">
                 <label for="questions_json" class="form-label">Questions JSON</label>
-                <textarea class="form-control" id="questions_json" name="questions_json" rows="10" required></textarea>
-                <div class="form-text">The importer accepts the same format as <code>sample_data/sample_questions.json</code>.</div>
+                <textarea class="form-control" id="questions_json" name="questions_json" rows="10" placeholder="[{ &quot;question&quot;: ... }] "></textarea>
+                <div class="form-text">The importer accepts the same format as <code>sample_data/sample_questions.json</code>. You can leave this blank when uploading a file.</div>
+              </div>
+              <div class="mb-3">
+                <label for="questions_file" class="form-label">Upload JSON file</label>
+                <input class="form-control" type="file" id="questions_file" name="questions_file" accept="application/json,.json">
+                <div class="form-text">When both are provided, the uploaded file takes priority.</div>
               </div>
               <button type="submit" class="btn btn-primary">Import Questions</button>
             </form>
@@ -456,14 +461,34 @@ function renderImport() {
   `;
 }
 
-function renderQuestionList({ questions, page, totalPages, perPage, totalQuestions }) {
+function renderQuestionList({
+  questions,
+  page,
+  totalPages,
+  perPage,
+  totalQuestions,
+  filters,
+  availableDomains,
+}) {
   const hasQuestions = totalQuestions > 0;
   const start = hasQuestions ? (page - 1) * perPage + 1 : 0;
   const end = hasQuestions ? Math.min(start + perPage - 1, totalQuestions) : 0;
+  const filterDomain = filters.domain || '';
+  const filterSearch = filters.search || '';
+  const hasActiveFilters = Boolean(filterDomain || filterSearch);
+  const domainOptions = availableDomains
+    .map((domain) => {
+      const selected = domain === filterDomain ? ' selected' : '';
+      return `<option value="${escapeHtml(domain)}"${selected}>${escapeHtml(domain)}</option>`;
+    })
+    .join('\n');
   const rows = questions
     .map(
       (question) => `
         <tr>
+          <td class="text-center">
+            <input class="form-check-input" type="checkbox" name="selected" value="${escapeHtml(question.id)}" form="exportForm" aria-label="Select question">
+          </td>
           <td>${escapeHtml(question.question)}</td>
           <td>${escapeHtml(question.domain)}</td>
           <td class="text-nowrap">
@@ -482,7 +507,16 @@ function renderQuestionList({ questions, page, totalPages, perPage, totalQuestio
   const paginationItems = Array.from({ length: totalPages }, (_, index) => index + 1)
     .map((number) => {
       const activeClass = number === page ? ' active' : '';
-      return `<li class="page-item${activeClass}"><a class="page-link" href="/questions?page=${number}">${number}</a></li>`;
+      const params = new URLSearchParams();
+      if (filterDomain) {
+        params.set('domain', filterDomain);
+      }
+      if (filterSearch) {
+        params.set('q', filterSearch);
+      }
+      params.set('page', number);
+      const href = `/questions?${params.toString()}`;
+      return `<li class="page-item${activeClass}"><a class="page-link" href="${escapeHtml(href)}">${number}</a></li>`;
     })
     .join('\n');
   const pagination =
@@ -500,21 +534,48 @@ function renderQuestionList({ questions, page, totalPages, perPage, totalQuestio
       <div class="col-lg-10">
         <div class="card mb-3">
           <div class="card-body">
-            <h5 class="card-title">Question Bank</h5>
-            <p class="card-text">${hasQuestions
-              ? `Showing ${escapeHtml(String(start))}–${escapeHtml(String(end))} of ${escapeHtml(String(totalQuestions))} questions.`
-              : 'No questions have been imported yet.'}</p>
+            <form id="exportForm" method="post" action="/questions/export"></form>
+            <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3 mb-3">
+              <div>
+                <h5 class="card-title mb-1">Question Bank</h5>
+                <p class="card-text mb-0">${hasQuestions
+                  ? `Showing ${escapeHtml(String(start))}–${escapeHtml(String(end))} of ${escapeHtml(String(totalQuestions))} questions.`
+                  : 'No questions have been imported yet.'}</p>
+              </div>
+              <div class="d-flex gap-2 flex-wrap">
+                <button type="submit" class="btn btn-outline-primary" form="exportForm" name="export_mode" value="selected">Export selected</button>
+                <button type="submit" class="btn btn-outline-secondary" form="exportForm" name="export_mode" value="all">Export all</button>
+              </div>
+            </div>
+            <form class="row g-3 align-items-end mb-4" method="get" action="/questions">
+              <div class="col-md-4">
+                <label for="domain_filter" class="form-label">Domain</label>
+                <select class="form-select" id="domain_filter" name="domain">
+                  <option value="">All domains</option>
+                  ${domainOptions}
+                </select>
+              </div>
+              <div class="col-md-6">
+                <label for="search_filter" class="form-label">Search</label>
+                <input type="search" class="form-control" id="search_filter" name="q" value="${escapeHtml(filterSearch)}" placeholder="Search question text or comment">
+              </div>
+              <div class="col-md-2 d-flex gap-2">
+                <button type="submit" class="btn btn-primary flex-grow-1">Filter</button>
+                ${hasActiveFilters ? '<a class="btn btn-outline-secondary" href="/questions">Reset</a>' : ''}
+              </div>
+            </form>
             <div class="table-responsive">
               <table class="table table-striped align-middle">
                 <thead>
                   <tr>
+                    <th scope="col" class="text-center">Select</th>
                     <th scope="col">Question</th>
                     <th scope="col">Domain</th>
                     <th scope="col" class="text-nowrap">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  ${rows || '<tr><td colspan="3" class="text-center text-muted">No questions imported yet.</td></tr>'}
+                  ${rows || '<tr><td colspan="4" class="text-center text-muted">No questions imported yet.</td></tr>'}
                 </tbody>
               </table>
             </div>
@@ -885,6 +946,64 @@ function collectRequestBody(req) {
   });
 }
 
+function parseMultipartFormData(bodyBuffer, boundary) {
+  const result = { fields: new Map(), files: [] };
+  if (!boundary) {
+    return result;
+  }
+  const delimiter = `--${boundary}`;
+  const bodyText = bodyBuffer.toString('utf8');
+  const sections = bodyText.split(delimiter);
+  for (const rawSection of sections) {
+    if (!rawSection) {
+      continue;
+    }
+    let section = rawSection;
+    if (section.startsWith('\r\n')) {
+      section = section.slice(2);
+    }
+    if (section === '--' || section === '--\r\n') {
+      continue;
+    }
+    if (section.endsWith('\r\n')) {
+      section = section.slice(0, -2);
+    }
+    const separatorIndex = section.indexOf('\r\n\r\n');
+    if (separatorIndex === -1) {
+      continue;
+    }
+    const headerPart = section.slice(0, separatorIndex);
+    let valuePart = section.slice(separatorIndex + 4);
+    if (valuePart.endsWith('\r\n')) {
+      valuePart = valuePart.slice(0, -2);
+    }
+    const headers = headerPart.split('\r\n');
+    const dispositionLine = headers.find((line) => /^content-disposition/i.test(line));
+    if (!dispositionLine) {
+      continue;
+    }
+    const nameMatch = dispositionLine.match(/name="([^"]+)"/i);
+    if (!nameMatch) {
+      continue;
+    }
+    const fieldName = nameMatch[1];
+    const filenameMatch = dispositionLine.match(/filename="([^"]*)"/i);
+    const contentTypeLine = headers.find((line) => /^content-type/i.test(line));
+    const contentType = contentTypeLine ? contentTypeLine.split(':').slice(1).join(':').trim() : 'text/plain';
+    if (filenameMatch && filenameMatch[1]) {
+      result.files.push({
+        name: fieldName,
+        filename: filenameMatch[1],
+        contentType,
+        content: valuePart,
+      });
+    } else {
+      result.fields.set(fieldName, valuePart);
+    }
+  }
+  return result;
+}
+
 function addFlash(session, category, message) {
   if (!session.flash) {
     session.flash = [];
@@ -952,13 +1071,37 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/questions' && req.method === 'GET') {
       const perPage = 10;
-      const totalQuestions = questions.length;
+      const domainFilter = (requestUrl.searchParams.get('domain') || '').trim();
+      const searchFilter = (requestUrl.searchParams.get('q') || '').trim();
+      const searchLower = searchFilter.toLowerCase();
+      const filtered = questions.filter((question) => {
+        const questionDomain = (question.domain || 'General').trim();
+        if (domainFilter && questionDomain !== domainFilter) {
+          return false;
+        }
+        if (searchFilter) {
+          const haystack = `${question.question || ''} ${question.comment || ''}`.toLowerCase();
+          if (!haystack.includes(searchLower)) {
+            return false;
+          }
+        }
+        return true;
+      });
+      const totalQuestions = filtered.length;
       const totalPages = Math.max(1, Math.ceil(Math.max(totalQuestions, 1) / perPage));
       const requestedPage = Number.parseInt(requestUrl.searchParams.get('page') || '1', 10);
       const page = Number.isFinite(requestedPage) && requestedPage >= 1 ? Math.min(requestedPage, totalPages) : 1;
       const startIndex = (page - 1) * perPage;
-      const pageItems = questions.slice(startIndex, startIndex + perPage);
-      const body = renderQuestionList({ questions: pageItems, page, totalPages, perPage, totalQuestions });
+      const pageItems = filtered.slice(startIndex, startIndex + perPage);
+      const body = renderQuestionList({
+        questions: pageItems,
+        page,
+        totalPages,
+        perPage,
+        totalQuestions,
+        filters: { domain: domainFilter, search: searchFilter },
+        availableDomains: domains,
+      });
       sendHtml(
         res,
         renderLayout({
@@ -970,6 +1113,34 @@ const server = http.createServer(async (req, res) => {
           body,
         }),
       );
+      return;
+    }
+
+    if (pathname === '/questions/export' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      const formData = new URLSearchParams(bodyBuffer.toString());
+      const exportMode = formData.get('export_mode') || 'selected';
+      const selectedIds = formData.getAll('selected').filter((value) => value);
+      let exportData = questions;
+      if (exportMode === 'selected') {
+        if (!selectedIds.length) {
+          addFlash(session, 'warning', 'Select at least one question to export or choose “Export all”.');
+          redirect(res, '/questions');
+          return;
+        }
+        const idSet = new Set(selectedIds);
+        exportData = questions.filter((question) => idSet.has(question.id));
+        if (!exportData.length) {
+          addFlash(session, 'warning', 'No matching questions were found for the selected items.');
+          redirect(res, '/questions');
+          return;
+        }
+      }
+      const payload = JSON.stringify(exportData, null, 2);
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="questions_export.json"');
+      res.end(payload);
       return;
     }
 
@@ -1159,15 +1330,33 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST') {
         const bodyBuffer = await collectRequestBody(req);
-        const formData = new URLSearchParams(bodyBuffer.toString());
-        const payloadText = formData.get('questions_json');
-        if (!payloadText) {
-          addFlash(session, 'danger', 'Please paste a JSON payload.');
+        const contentType = req.headers['content-type'] || '';
+        let payloadText = '';
+        if (/^multipart\/form-data/i.test(contentType)) {
+          const boundaryMatch = contentType.match(/boundary="?([^";]+)"?/i);
+          const boundary = boundaryMatch ? boundaryMatch[1] : '';
+          const parsed = parseMultipartFormData(bodyBuffer, boundary);
+          const uploaded = parsed.files.find(
+            (file) => file.name === 'questions_file' && typeof file.content === 'string' && file.content.trim(),
+          );
+          if (uploaded) {
+            payloadText = uploaded.content;
+          }
+          if (!payloadText && parsed.fields.has('questions_json')) {
+            payloadText = parsed.fields.get('questions_json') || '';
+          }
+        } else {
+          const formData = new URLSearchParams(bodyBuffer.toString());
+          payloadText = formData.get('questions_json') || '';
+        }
+        const trimmedPayload = (payloadText || '').trim();
+        if (!trimmedPayload) {
+          addFlash(session, 'danger', 'Provide questions JSON by pasting data or uploading a file.');
           redirect(res, '/import');
           return;
         }
         try {
-          const parsed = JSON.parse(payloadText);
+          const parsed = JSON.parse(trimmedPayload);
           const stats = importQuestions(parsed);
           addFlash(session, 'success', `Imported ${stats.imported} questions, updated ${stats.updated}.`);
           redirect(res, '/');
