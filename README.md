@@ -5,6 +5,7 @@ A lightweight Node.js web application for managing CISSP-style practice question
 ## Features
 
 - Import questions from local JSON files and persist them to disk.
+- Import long-form exam dumps where questions appear first and the answer key follows at the end.
 - Build randomized practice tests with optional domain filters.
 - Take tests in the browser, receive instant scoring, and view detailed explanations.
 - Track questions answered incorrectly and automatically create review sessions from them.
@@ -27,6 +28,15 @@ A lightweight Node.js web application for managing CISSP-style practice question
 3. **Import sample questions (optional)**
 
 Use the provided [`sample_data/sample_questions.json`](sample_data/sample_questions.json) file to populate the question bank. Copy the JSON payload into the importer form.
+
+To import a transcript that lists all questions before their answers:
+
+1. Paste the passage into the <strong>Import from structured text</strong> form.
+2. Keep the questions in order (1, 2, 3, …) with their answer choices (A, B, C, …).
+3. Add an <strong>Answers</strong> (or <strong>答案</strong>) heading near the end and list each answer starting with its number, followed by the correct option and any explanation.
+4. Provide the domain that should apply to the entire batch.
+
+The importer automatically associates the answer key entries with their matching questions, keeps shared scenarios intact, and saves the explanations as comments.
 
 ## Question JSON format
 
