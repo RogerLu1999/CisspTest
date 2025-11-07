@@ -247,6 +247,269 @@ function importQuestions(rawData) {
   return { imported, updated };
 }
 
+function joinAndNormalizeLines(lines) {
+  const compacted = lines
+    .join('\n')
+    .replace(/\s+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return compacted;
+}
+
+function parseStructuredTextImport(rawText, domainInput) {
+  if (!rawText || !rawText.trim()) {
+    throw new Error('The provided text is empty.');
+  }
+  const domain = (domainInput || '').toString().trim() || 'General';
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+$/, ''));
+  const answerHeadingRegex = /^\s*(?:答案|Answer(?:s)?|Answer\s*Key|解答|解析)\b/i;
+  let splitIndex = lines.findIndex((line) => answerHeadingRegex.test(line));
+  if (splitIndex === -1) {
+    splitIndex = lines.findIndex((line) => /^\s*Answers?\s*:?.*$/i.test(line));
+  }
+  if (splitIndex === -1) {
+    throw new Error('Unable to locate the answer section. Add a heading like "Answers" or "答案".');
+  }
+  const questionLines = lines.slice(0, splitIndex);
+  const answerLines = lines.slice(splitIndex);
+  if (answerLines.length && answerHeadingRegex.test(answerLines[0])) {
+    answerLines.shift();
+  }
+
+  const questions = [];
+  let currentQuestion = null;
+  let currentChoice = null;
+  let activeContext = [];
+  let pendingContext = [];
+
+  function commitChoice() {
+    if (currentQuestion && currentChoice) {
+      const label = currentChoice.label;
+      const text = joinAndNormalizeLines(currentChoice.lines);
+      if (text) {
+        currentQuestion.choices.push({ label, text });
+      }
+    }
+    currentChoice = null;
+  }
+
+  function commitQuestion() {
+    if (!currentQuestion) {
+      return;
+    }
+    commitChoice();
+    const questionBody = joinAndNormalizeLines(currentQuestion.questionLines);
+    if (!questionBody) {
+      throw new Error(`Question ${currentQuestion.number} is missing text.`);
+    }
+    if (currentQuestion.choices.length < 2) {
+      throw new Error(`Question ${currentQuestion.number} must include at least two choices.`);
+    }
+    const sortedChoices = currentQuestion.choices
+      .slice()
+      .sort((a, b) => a.label.localeCompare(b.label));
+    const combinedParts = [];
+    if (activeContext.length) {
+      const contextText = joinAndNormalizeLines(activeContext);
+      if (contextText) {
+        combinedParts.push(contextText);
+      }
+    }
+    combinedParts.push(questionBody);
+    questions.push({
+      number: currentQuestion.number,
+      text: combinedParts.join('\n\n').trim(),
+      choices: sortedChoices.map((item) => item.text),
+    });
+    currentQuestion = null;
+  }
+
+  const choiceRegex = /^([A-L])[).、]\s*(.*)$/i;
+  const questionRegex = /^(\d+)[).、]\s*(.*)$/;
+
+  for (const line of questionLines) {
+    const trimmed = line.trim();
+    if (!currentQuestion) {
+      if (!trimmed) {
+        if (pendingContext.length) {
+          pendingContext.push('');
+        }
+        continue;
+      }
+      const questionMatch = trimmed.match(questionRegex);
+      if (questionMatch) {
+        commitQuestion();
+        if (pendingContext.length) {
+          activeContext = pendingContext.slice();
+          pendingContext = [];
+        }
+        currentQuestion = {
+          number: Number.parseInt(questionMatch[1], 10),
+          questionLines: [questionMatch[2] || ''],
+          choices: [],
+        };
+        currentChoice = null;
+        continue;
+      }
+      pendingContext.push(line);
+      continue;
+    }
+    if (!trimmed) {
+      if (currentChoice) {
+        currentChoice.lines.push('');
+      } else {
+        currentQuestion.questionLines.push('');
+      }
+      continue;
+    }
+    const choiceMatch = trimmed.match(choiceRegex);
+    if (choiceMatch) {
+      commitChoice();
+      currentChoice = {
+        label: choiceMatch[1].toUpperCase(),
+        lines: [choiceMatch[2] || ''],
+      };
+      continue;
+    }
+    if (currentChoice) {
+      currentChoice.lines.push(line);
+    } else {
+      currentQuestion.questionLines.push(line);
+    }
+  }
+  commitQuestion();
+
+  if (!questions.length) {
+    throw new Error('No questions were detected in the provided text.');
+  }
+
+  const answers = new Map();
+  const answerEntryRegex = /^(?:答案|Answer(?:s)?|解答|解析|正确答案)?\s*(\d+)[).:：-]?\s*(.*)$/i;
+  let currentAnswer = null;
+
+  function parseAnswerTokens(value) {
+    if (!value) {
+      return { letters: [], explanationPart: '' };
+    }
+    let working = value.replace(/^(?:答案|Answer(?:s)?|解答|解析|正确答案)\s*[:：]?/i, '').trim();
+    const explanationKeywords = /(解析|Explanation|解釋|解释|因为|因為|Rationale)\s*[:：]?/i;
+    let explanationPart = '';
+    const keywordMatch = working.match(explanationKeywords);
+    if (keywordMatch) {
+      const index = working.indexOf(keywordMatch[0]);
+      if (index !== -1) {
+        explanationPart = working.slice(index).trim();
+        working = working.slice(0, index).trim();
+      }
+    }
+    const cleaned = working.replace(/\band\b/gi, ',').replace(/&/g, ',');
+    const tokens = cleaned
+      .split(/[,/\s]+/)
+      .map((token) => token.trim())
+      .filter((token) => token);
+    const letters = [];
+    for (const token of tokens) {
+      const strippedToken = token.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '');
+      if (!strippedToken) {
+        continue;
+      }
+      const normalizedToken = strippedToken.toUpperCase();
+      if (/^[A-L]$/.test(normalizedToken)) {
+        letters.push(normalizedToken);
+      } else if (/^[A-L]{2,}$/.test(normalizedToken)) {
+        for (const char of normalizedToken) {
+          if (/^[A-L]$/.test(char)) {
+            letters.push(char);
+          }
+        }
+      }
+    }
+    if (!letters.length) {
+      const fallback = value.match(/\b[A-L]\b/g);
+      if (fallback) {
+        for (const char of fallback) {
+          letters.push(char);
+        }
+      }
+    }
+    const uniqueLetters = Array.from(new Set(letters));
+    return { letters: uniqueLetters, explanationPart };
+  }
+
+  function finalizeAnswer() {
+    if (!currentAnswer) {
+      return;
+    }
+    const explanation = joinAndNormalizeLines(currentAnswer.lines);
+    answers.set(currentAnswer.number, {
+      letters: currentAnswer.letters,
+      explanation,
+    });
+    currentAnswer = null;
+  }
+
+  for (const rawLine of answerLines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (answerHeadingRegex.test(trimmed)) {
+      continue;
+    }
+    const match = trimmed.match(answerEntryRegex);
+    if (match) {
+      finalizeAnswer();
+      const number = Number.parseInt(match[1], 10);
+      const { letters, explanationPart } = parseAnswerTokens(match[2] || '');
+      currentAnswer = {
+        number,
+        letters,
+        lines: explanationPart ? [explanationPart] : [],
+      };
+      continue;
+    }
+    if (currentAnswer) {
+      currentAnswer.lines.push(rawLine);
+    }
+  }
+  finalizeAnswer();
+
+  const preparedQuestions = questions.map((question) => {
+    if (!answers.has(question.number)) {
+      throw new Error(`No answer was found for question ${question.number}.`);
+    }
+    const { letters, explanation } = answers.get(question.number);
+    if (!letters.length) {
+      throw new Error(`Question ${question.number} is missing a valid answer option.`);
+    }
+    const indexes = [];
+    for (const letter of letters) {
+      const idx = letter.charCodeAt(0) - 65;
+      if (idx < 0 || idx >= question.choices.length) {
+        throw new Error(`Answer ${letter} for question ${question.number} does not match any choice.`);
+      }
+      if (!indexes.includes(idx)) {
+        indexes.push(idx);
+      }
+    }
+    if (!indexes.length) {
+      throw new Error(`Question ${question.number} is missing a valid answer option.`);
+    }
+    indexes.sort((a, b) => a - b);
+    return {
+      question: question.text,
+      choices: question.choices,
+      correct_answers: indexes,
+      domain,
+      comment: explanation,
+    };
+  });
+
+  return preparedQuestions;
+}
+
 function loadWrongAnswers() {
   return readJson(WRONG_FILE);
 }
@@ -469,11 +732,11 @@ function renderIndex({ questionCount, wrongCount, domains, wrongDetails }) {
 
 function renderImport() {
   return `
-    <div class="row justify-content-center">
+    <div class="row g-4">
       <div class="col-lg-6">
-        <div class="card">
+        <div class="card h-100">
           <div class="card-body">
-            <h5 class="card-title">Import questions</h5>
+            <h5 class="card-title">Import JSON</h5>
             <p class="card-text">Paste your questions as JSON or upload a JSON file. Each entry should include the prompt, choices, and the correct answer(s).</p>
             <form method="post" enctype="multipart/form-data">
               <div class="mb-3">
@@ -486,7 +749,28 @@ function renderImport() {
                 <input class="form-control" type="file" id="questions_file" name="questions_file" accept="application/json,.json">
                 <div class="form-text">When both are provided, the uploaded file takes priority.</div>
               </div>
-              <button type="submit" class="btn btn-primary">Import Questions</button>
+              <button type="submit" class="btn btn-primary">Import JSON</button>
+            </form>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title">Import from structured text</h5>
+            <p class="card-text">Provide a long passage that lists the questions first and an answer key afterwards. The importer matches answers by their number.</p>
+            <form method="post">
+              <div class="mb-3">
+                <label for="batch_domain" class="form-label">Domain for this batch</label>
+                <input type="text" class="form-control" id="batch_domain" name="batch_domain" placeholder="e.g. Security and Risk Management">
+                <div class="form-text">The selected domain is applied to every question imported from this text.</div>
+              </div>
+              <div class="mb-3">
+                <label for="questions_text" class="form-label">Questions &amp; Answers</label>
+                <textarea class="form-control" id="questions_text" name="questions_text" rows="12" placeholder="1. ...\nA. ...\nB. ...\n...\nAnswers\n1. A Explanation: ..."></textarea>
+                <div class="form-text">Include an <strong>Answers</strong> (or <strong>答案</strong>) heading followed by one line per question, each starting with its number and the correct option.</div>
+              </div>
+              <button type="submit" class="btn btn-primary">Import Structured Text</button>
             </form>
           </div>
         </div>
@@ -1646,6 +1930,8 @@ const server = http.createServer(async (req, res) => {
         const bodyBuffer = await collectRequestBody(req);
         const contentType = req.headers['content-type'] || '';
         let payloadText = '';
+        let textImport = '';
+        let batchDomain = '';
         if (/^multipart\/form-data/i.test(contentType)) {
           const boundaryMatch = contentType.match(/boundary="?([^";]+)"?/i);
           const boundary = boundaryMatch ? boundaryMatch[1] : '';
@@ -1659,9 +1945,30 @@ const server = http.createServer(async (req, res) => {
           if (!payloadText && parsed.fields.has('questions_json')) {
             payloadText = parsed.fields.get('questions_json') || '';
           }
+          if (parsed.fields.has('questions_text')) {
+            textImport = parsed.fields.get('questions_text') || '';
+          }
+          if (parsed.fields.has('batch_domain')) {
+            batchDomain = parsed.fields.get('batch_domain') || '';
+          }
         } else {
           const formData = new URLSearchParams(bodyBuffer.toString());
           payloadText = formData.get('questions_json') || '';
+          textImport = formData.get('questions_text') || '';
+          batchDomain = formData.get('batch_domain') || '';
+        }
+        const trimmedTextImport = (textImport || '').trim();
+        if (trimmedTextImport) {
+          try {
+            const prepared = parseStructuredTextImport(trimmedTextImport, batchDomain);
+            const stats = importQuestions(prepared);
+            addFlash(session, 'success', `Imported ${stats.imported} questions, updated ${stats.updated}.`);
+            redirect(res, '/');
+          } catch (error) {
+            addFlash(session, 'danger', `Failed to import questions: ${error.message}`);
+            redirect(res, '/import');
+          }
+          return;
         }
         const trimmedPayload = (payloadText || '').trim();
         if (!trimmedPayload) {
