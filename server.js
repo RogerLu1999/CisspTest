@@ -1626,7 +1626,10 @@ function renderLayout({ title, questionCount, wrongCount, domains, flashMessages
         <div class="collapse navbar-collapse" id="navbarNav">
           <ul class="navbar-nav me-auto mb-2 mb-lg-0">
             <li class="nav-item">
-              <a class="nav-link" href="/import">Import Questions</a>
+              <a class="nav-link" href="/import/json">Import JSON</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="/import/ai">AI Import (Qwen)</a>
             </li>
             <li class="nav-item">
               <a class="nav-link" href="/questions">Question Bank</a>
@@ -1697,7 +1700,7 @@ function renderIndex({ questionCount, wrongCount, domains, wrongDetails }) {
             <h5 class="card-title">Get Started</h5>
             <p class="card-text">Import your CISSP practice questions, launch a new test, or focus on the questions you previously missed.</p>
             <div class="d-grid gap-2">
-              <a class="btn btn-primary" href="/import">Import Questions</a>
+              <a class="btn btn-primary" href="/import/json">Import Questions</a>
               <a class="btn btn-success${questionCount === 0 ? ' disabled' : ''}" href="${questionCount === 0 ? '#' : '/test/new'}">Start New Test</a>
               <a class="btn btn-outline-warning${wrongCount === 0 ? ' disabled' : ''}" href="${wrongCount === 0 ? '#' : '/review'}">Review Mistakes</a>
             </div>
@@ -1753,7 +1756,35 @@ function buildDomainOptions(domains, selectedValue) {
   return `${options}\n<option value="__custom__"${customSelected}>Other (custom domain)</option>`;
 }
 
-function renderImport({
+function renderImportJson() {
+  return `
+    <div class="row justify-content-center">
+      <div class="col-xl-8 col-lg-9">
+        <div class="card">
+          <div class="card-body">
+            <h5 class="card-title">Import JSON</h5>
+            <p class="card-text">Paste your questions as JSON or upload a JSON file organized into question groups. Each group includes its domain, an optional context, and one or more questions with choices and explanations.</p>
+            <form method="post" enctype="multipart/form-data">
+              <div class="mb-3">
+                <label for="questions_json" class="form-label">Questions JSON</label>
+                <textarea class="form-control" id="questions_json" name="questions_json" rows="10" placeholder="{ &quot;groups&quot;: [ ... ] }"></textarea>
+                <div class="form-text">See <code>sample_data/sample_question_groups.json</code> for an example structure. You can leave this blank when uploading a file.</div>
+              </div>
+              <div class="mb-3">
+                <label for="questions_file" class="form-label">Upload JSON file</label>
+                <input class="form-control" type="file" id="questions_file" name="questions_file" accept="application/json,.json">
+                <div class="form-text">When both are provided, the uploaded file takes priority.</div>
+              </div>
+              <button type="submit" class="btn btn-primary">Import JSON</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderImportAi({
   domains = [],
   aiSelectedDomain = 'General',
   aiCustomDomain = '',
@@ -1845,7 +1876,7 @@ function renderImport({
                   <div class="form-text">Review and adjust the JSON before importing. Keep the structure valid to avoid errors.</div>
                 </div>
                 <button type="submit" class="btn btn-success">Import ${questionCountLabel} Question${questionCount === 1 ? '' : 's'}</button>
-                <a class="btn btn-outline-secondary ms-2" href="/import">Cancel</a>
+                <a class="btn btn-outline-secondary ms-2" href="/import/ai">Cancel</a>
               </form>
               ${originalText}
             </div>
@@ -1855,29 +1886,8 @@ function renderImport({
     : '';
 
   return `
-    <div class="row g-4">
-      <div class="col-xl-6 col-lg-6">
-        <div class="card h-100">
-          <div class="card-body">
-            <h5 class="card-title">Import JSON</h5>
-            <p class="card-text">Paste your questions as JSON or upload a JSON file organized into question groups. Each group includes its domain, an optional context, and one or more questions with choices and explanations.</p>
-            <form method="post" enctype="multipart/form-data">
-              <div class="mb-3">
-                <label for="questions_json" class="form-label">Questions JSON</label>
-                <textarea class="form-control" id="questions_json" name="questions_json" rows="10" placeholder="{ &quot;groups&quot;: [ ... ] }"></textarea>
-                <div class="form-text">See <code>sample_data/sample_question_groups.json</code> for an example structure. You can leave this blank when uploading a file.</div>
-              </div>
-              <div class="mb-3">
-                <label for="questions_file" class="form-label">Upload JSON file</label>
-                <input class="form-control" type="file" id="questions_file" name="questions_file" accept="application/json,.json">
-                <div class="form-text">When both are provided, the uploaded file takes priority.</div>
-              </div>
-              <button type="submit" class="btn btn-primary">Import JSON</button>
-            </form>
-          </div>
-        </div>
-      </div>
-      <div class="col-xl-6 col-lg-6">
+    <div class="row justify-content-center">
+      <div class="col-xl-8 col-lg-9">
         <div class="card h-100">
           <div class="card-body">
             <h5 class="card-title">AI-assisted import (Qwen)</h5>
@@ -3232,15 +3242,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/import') {
+      redirect(res, '/import/json');
+      return;
+    }
+
+    if (pathname === '/import/json') {
       if (req.method === 'GET') {
-        const body = renderImport({
-          domains,
-          qwenEnabled: Boolean(QWEN_API_KEY && QWEN_API_KEY.trim()),
-        });
+        const body = renderImportJson();
         sendHtml(
           res,
           renderLayout({
-            title: 'Import Questions · CISSP Test Simulator',
+            title: 'Import JSON · CISSP Test Simulator',
             questionCount,
             wrongCount: wrongAnswers.length,
             domains,
@@ -3257,12 +3269,6 @@ const server = http.createServer(async (req, res) => {
         let textImport = '';
         let batchDomain = '';
         let customDomain = '';
-        let importMode = 'standard';
-        let aiDomain = '';
-        let aiCustomDomain = '';
-        let aiSource = '';
-        let aiPayload = '';
-        let aiInstructions = '';
         if (/^multipart\/form-data/i.test(contentType)) {
           const boundaryMatch = contentType.match(/boundary="?([^";]+)"?/i);
           const boundary = boundaryMatch ? boundaryMatch[1] : '';
@@ -3285,8 +3291,81 @@ const server = http.createServer(async (req, res) => {
           if (parsed.fields.has('custom_domain')) {
             customDomain = parsed.fields.get('custom_domain') || '';
           }
+        } else {
+          const formData = new URLSearchParams(bodyBuffer.toString());
+          payloadText = formData.get('questions_json') || '';
+          textImport = formData.get('questions_text') || '';
+          batchDomain = formData.get('batch_domain') || '';
+          customDomain = formData.get('custom_domain') || '';
+        }
+        const trimmedTextImport = (textImport || '').trim();
+        if (trimmedTextImport) {
+          try {
+            const structuredDomain = resolveDomainInput(batchDomain, customDomain);
+            const prepared = parseStructuredTextImport(trimmedTextImport, structuredDomain);
+            const stats = importQuestions(prepared);
+            addFlash(session, 'success', `Imported ${stats.imported} questions, updated ${stats.updated}.`);
+            redirect(res, '/');
+          } catch (error) {
+            addFlash(session, 'danger', `Failed to import questions: ${error.message}`);
+            redirect(res, '/import/json');
+          }
+          return;
+        }
+        const trimmedPayload = (payloadText || '').trim();
+        if (!trimmedPayload) {
+          addFlash(session, 'danger', 'Provide questions JSON by pasting data or uploading a file.');
+          redirect(res, '/import/json');
+          return;
+        }
+        try {
+          const parsed = JSON.parse(trimmedPayload);
+          const stats = importQuestions(parsed);
+          addFlash(session, 'success', `Imported ${stats.imported} questions, updated ${stats.updated}.`);
+          redirect(res, '/');
+        } catch (error) {
+          addFlash(session, 'danger', `Failed to import questions: ${error.message}`);
+          redirect(res, '/import/json');
+        }
+        return;
+      }
+    }
+
+    if (pathname === '/import/ai') {
+      const qwenEnabled = Boolean(QWEN_API_KEY && QWEN_API_KEY.trim());
+      if (req.method === 'GET') {
+        const body = renderImportAi({
+          domains,
+          qwenEnabled,
+        });
+        sendHtml(
+          res,
+          renderLayout({
+            title: 'AI Import (Qwen) · CISSP Test Simulator',
+            questionCount,
+            wrongCount: wrongAnswers.length,
+            domains,
+            flashMessages,
+            body,
+          }),
+        );
+        return;
+      }
+      if (req.method === 'POST') {
+        const bodyBuffer = await collectRequestBody(req);
+        const contentType = req.headers['content-type'] || '';
+        let importMode = 'ai_prepare';
+        let aiDomain = '';
+        let aiCustomDomain = '';
+        let aiSource = '';
+        let aiPayload = '';
+        let aiInstructions = '';
+        if (/^multipart\/form-data/i.test(contentType)) {
+          const boundaryMatch = contentType.match(/boundary="?([^";]+)"?/i);
+          const boundary = boundaryMatch ? boundaryMatch[1] : '';
+          const parsed = parseMultipartFormData(bodyBuffer, boundary);
           if (parsed.fields.has('import_mode')) {
-            importMode = parsed.fields.get('import_mode') || 'standard';
+            importMode = parsed.fields.get('import_mode') || 'ai_prepare';
           }
           if (parsed.fields.has('ai_domain')) {
             aiDomain = parsed.fields.get('ai_domain') || '';
@@ -3305,11 +3384,7 @@ const server = http.createServer(async (req, res) => {
           }
         } else {
           const formData = new URLSearchParams(bodyBuffer.toString());
-          payloadText = formData.get('questions_json') || '';
-          textImport = formData.get('questions_text') || '';
-          batchDomain = formData.get('batch_domain') || '';
-          customDomain = formData.get('custom_domain') || '';
-          importMode = formData.get('import_mode') || 'standard';
+          importMode = formData.get('import_mode') || 'ai_prepare';
           aiDomain = formData.get('ai_domain') || '';
           aiCustomDomain = formData.get('ai_custom_domain') || '';
           aiSource = formData.get('ai_source') || '';
@@ -3322,7 +3397,7 @@ const server = http.createServer(async (req, res) => {
           const trimmedPayload = (aiPayload || '').trim();
           if (!trimmedPayload) {
             addFlash(session, 'danger', 'The AI preview payload was missing. Please run the analysis again.');
-            redirect(res, '/import');
+            redirect(res, '/import/ai');
             return;
           }
           try {
@@ -3332,19 +3407,24 @@ const server = http.createServer(async (req, res) => {
             redirect(res, '/');
           } catch (error) {
             addFlash(session, 'danger', `Failed to import AI results: ${error.message}`);
-            redirect(res, '/import');
+            redirect(res, '/import/ai');
           }
           return;
         }
         if (importMode === 'ai_prepare') {
+          if (!qwenEnabled) {
+            addFlash(session, 'danger', 'AI-assisted imports are disabled. Set the DASHSCOPE_API_KEY before running the analysis.');
+            redirect(res, '/import/ai');
+            return;
+          }
           if (!trimmedAiSource) {
             addFlash(session, 'danger', 'Provide the raw questions and answers before running the AI import.');
-            redirect(res, '/import');
+            redirect(res, '/import/ai');
             return;
           }
           if (!aiDomainValue) {
             addFlash(session, 'danger', 'Select or enter a domain for the AI import.');
-            redirect(res, '/import');
+            redirect(res, '/import/ai');
             return;
           }
           try {
@@ -3354,9 +3434,9 @@ const server = http.createServer(async (req, res) => {
                 ? '__custom__'
                 : result.domain;
             const aiCustomValueForForm = aiSelectValue === '__custom__' ? result.domain : '';
-            const previewBody = renderImport({
+            const previewBody = renderImportAi({
               domains,
-              qwenEnabled: Boolean(QWEN_API_KEY && QWEN_API_KEY.trim()),
+              qwenEnabled,
               aiSelectedDomain: aiSelectValue,
               aiCustomDomain: aiCustomValueForForm,
               aiSourceText: trimmedAiSource,
@@ -3376,7 +3456,7 @@ const server = http.createServer(async (req, res) => {
             sendHtml(
               res,
               renderLayout({
-                title: 'Import Questions · CISSP Test Simulator',
+                title: 'AI Import (Qwen) · CISSP Test Simulator',
                 questionCount,
                 wrongCount: wrongAnswers.length,
                 domains,
@@ -3386,39 +3466,12 @@ const server = http.createServer(async (req, res) => {
             );
           } catch (error) {
             addFlash(session, 'danger', `Failed to analyze questions with Qwen: ${error.message}`);
-            redirect(res, '/import');
+            redirect(res, '/import/ai');
           }
           return;
         }
-        const trimmedTextImport = (textImport || '').trim();
-        if (trimmedTextImport) {
-          try {
-            const structuredDomain = resolveDomainInput(batchDomain, customDomain);
-            const prepared = parseStructuredTextImport(trimmedTextImport, structuredDomain);
-            const stats = importQuestions(prepared);
-            addFlash(session, 'success', `Imported ${stats.imported} questions, updated ${stats.updated}.`);
-            redirect(res, '/');
-          } catch (error) {
-            addFlash(session, 'danger', `Failed to import questions: ${error.message}`);
-            redirect(res, '/import');
-          }
-          return;
-        }
-        const trimmedPayload = (payloadText || '').trim();
-        if (!trimmedPayload) {
-          addFlash(session, 'danger', 'Provide questions JSON by pasting data or uploading a file.');
-          redirect(res, '/import');
-          return;
-        }
-        try {
-          const parsed = JSON.parse(trimmedPayload);
-          const stats = importQuestions(parsed);
-          addFlash(session, 'success', `Imported ${stats.imported} questions, updated ${stats.updated}.`);
-          redirect(res, '/');
-        } catch (error) {
-          addFlash(session, 'danger', `Failed to import questions: ${error.message}`);
-          redirect(res, '/import');
-        }
+        addFlash(session, 'danger', 'Unsupported AI import mode.');
+        redirect(res, '/import/ai');
         return;
       }
     }
@@ -3442,7 +3495,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST') {
         if (groupCount === 0) {
           addFlash(session, 'warning', 'Import questions before creating a test.');
-          redirect(res, '/import');
+          redirect(res, '/import/json');
           return;
         }
         const bodyBuffer = await collectRequestBody(req);
