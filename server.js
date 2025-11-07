@@ -8,6 +8,7 @@ const BASE_DIR = __dirname;
 const DATA_DIR = path.join(BASE_DIR, 'data');
 const QUESTIONS_FILE = path.join(DATA_DIR, 'questions.json');
 const WRONG_FILE = path.join(DATA_DIR, 'wrong_questions.json');
+const QUESTION_BANK_VERSION = 2;
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8000;
 
@@ -151,6 +152,292 @@ function normalizeQuestion(rawQuestion) {
   };
 }
 
+function normalizeExplanation(rawValue) {
+  if (rawValue === undefined || rawValue === null) {
+    return '';
+  }
+  return rawValue.toString().trim();
+}
+
+function buildGroupFromLegacyQuestion(question) {
+  if (!question || typeof question !== 'object') {
+    return null;
+  }
+  const normalized = {
+    id: question.id ? String(question.id) : uuidv5(String(question.question || crypto.randomUUID()), DNS_NAMESPACE),
+    question: String(question.question || ''),
+    choices: Array.isArray(question.choices) ? question.choices.map((choice) => choice.toString()) : [],
+    correct_answers: Array.isArray(question.correct_answers)
+      ? question.correct_answers.map((value) => Number.parseInt(value, 10)).filter((value) => Number.isInteger(value))
+      : normalizeCorrectAnswers(question.correct_answers, Array.isArray(question.choices) ? question.choices : []),
+    explanation: normalizeExplanation(question.comment || question.explanation),
+  };
+  if (!normalized.question || normalized.choices.length < 2 || !normalized.correct_answers.length) {
+    return null;
+  }
+  const groupIdSource = question.group_id || question.groupId || `group-${normalized.id}`;
+  return {
+    id: String(groupIdSource),
+    domain: (question.domain || 'General').toString().trim() || 'General',
+    context: normalizeExplanation(question.context),
+    questions: [normalized],
+  };
+}
+
+function sanitizeGroup(rawGroup) {
+  if (!rawGroup || typeof rawGroup !== 'object') {
+    return null;
+  }
+  const domain = (rawGroup.domain || 'General').toString().trim() || 'General';
+  const context = normalizeExplanation(rawGroup.context);
+  const groupId = rawGroup.id ? String(rawGroup.id) : crypto.randomUUID();
+  const questions = Array.isArray(rawGroup.questions) ? rawGroup.questions : [];
+  const sanitizedQuestions = [];
+  for (const rawQuestion of questions) {
+    if (!rawQuestion || typeof rawQuestion !== 'object') {
+      continue;
+    }
+    const text = rawQuestion.question || rawQuestion.prompt || rawQuestion.text || '';
+    const questionText = text.toString().trim();
+    if (!questionText) {
+      continue;
+    }
+    let rawChoices = rawQuestion.choices || rawQuestion.options;
+    if (rawChoices && typeof rawChoices === 'object' && !Array.isArray(rawChoices)) {
+      rawChoices = Object.keys(rawChoices)
+        .sort()
+        .map((key) => rawChoices[key]);
+    }
+    if (!Array.isArray(rawChoices) || rawChoices.length < 2) {
+      continue;
+    }
+    const choices = rawChoices.map((choice) => choice.toString());
+    const correctAnswers = Array.isArray(rawQuestion.correct_answers)
+      ? rawQuestion.correct_answers
+          .map((value) => Number.parseInt(value, 10))
+          .filter((value) => Number.isInteger(value) && value >= 0 && value < choices.length)
+      : normalizeCorrectAnswers(
+          rawQuestion.correct_answers || rawQuestion.correct_answer || rawQuestion.answers,
+          choices,
+        );
+    if (!correctAnswers.length) {
+      continue;
+    }
+    const explanation = normalizeExplanation(rawQuestion.comment || rawQuestion.explanation);
+    const questionId = rawQuestion.id
+      ? String(rawQuestion.id)
+      : uuidv5(`${groupId}::${questionText}`, DNS_NAMESPACE);
+    sanitizedQuestions.push({
+      id: questionId,
+      question: questionText,
+      choices,
+      correct_answers: Array.from(new Set(correctAnswers)).sort((a, b) => a - b),
+      explanation,
+    });
+  }
+  if (!sanitizedQuestions.length) {
+    return null;
+  }
+  return {
+    id: groupId,
+    domain,
+    context,
+    questions: sanitizedQuestions,
+  };
+}
+
+function loadQuestionBank() {
+  const raw = readJson(QUESTIONS_FILE);
+  if (Array.isArray(raw)) {
+    const groups = [];
+    for (const item of raw) {
+      const group = buildGroupFromLegacyQuestion(item);
+      if (group) {
+        groups.push(group);
+      }
+    }
+    return { version: QUESTION_BANK_VERSION, groups };
+  }
+  if (raw && typeof raw === 'object') {
+    if (Array.isArray(raw.groups)) {
+      const groups = raw.groups
+        .map((group) => sanitizeGroup(group))
+        .filter((group) => group !== null);
+      return { version: QUESTION_BANK_VERSION, groups };
+    }
+    if (Array.isArray(raw.questions)) {
+      const groups = [];
+      for (const item of raw.questions) {
+        const group = buildGroupFromLegacyQuestion(item);
+        if (group) {
+          groups.push(group);
+        }
+      }
+      return { version: QUESTION_BANK_VERSION, groups };
+    }
+  }
+  return { version: QUESTION_BANK_VERSION, groups: [] };
+}
+
+function saveQuestionBank(bank) {
+  if (!bank || typeof bank !== 'object') {
+    writeJson(QUESTIONS_FILE, { version: QUESTION_BANK_VERSION, groups: [] });
+    return;
+  }
+  const groups = Array.isArray(bank.groups) ? bank.groups : [];
+  const sanitized = groups
+    .map((group) => sanitizeGroup(group))
+    .filter((group) => group !== null);
+  writeJson(QUESTIONS_FILE, { version: QUESTION_BANK_VERSION, groups: sanitized });
+}
+
+function flattenQuestionBank(bank) {
+  const result = [];
+  if (!bank || !Array.isArray(bank.groups)) {
+    return result;
+  }
+  for (const group of bank.groups) {
+    if (!group || typeof group !== 'object') {
+      continue;
+    }
+    const domain = (group.domain || 'General').toString().trim() || 'General';
+    const context = normalizeExplanation(group.context);
+    const questions = Array.isArray(group.questions) ? group.questions : [];
+    for (const question of questions) {
+      if (!question || typeof question !== 'object') {
+        continue;
+      }
+      const text = (question.question || question.prompt || question.text || '').toString().trim();
+      if (!text) {
+        continue;
+      }
+      const rawChoices = Array.isArray(question.choices) ? question.choices : [];
+      const choices = rawChoices.map((choice) => choice.toString());
+      if (choices.length < 2) {
+        continue;
+      }
+      const correctAnswers = Array.isArray(question.correct_answers)
+        ? question.correct_answers
+            .map((value) => Number.parseInt(value, 10))
+            .filter((value) => Number.isInteger(value) && value >= 0 && value < choices.length)
+        : normalizeCorrectAnswers(question.correct_answers, choices);
+      if (!correctAnswers.length) {
+        continue;
+      }
+      const explanation = normalizeExplanation(question.explanation || question.comment);
+      const id = question.id ? String(question.id) : uuidv5(`${text}::${domain}`, DNS_NAMESPACE);
+      result.push({
+        id,
+        question: text,
+        choices,
+        correct_answers: Array.from(new Set(correctAnswers)).sort((a, b) => a - b),
+        comment: explanation,
+        explanation,
+        domain,
+        group_id: group.id ? String(group.id) : '',
+        group_context: context,
+      });
+    }
+  }
+  return result;
+}
+
+function findQuestionLocation(bank, questionId) {
+  if (!bank || !Array.isArray(bank.groups)) {
+    return null;
+  }
+  for (let groupIndex = 0; groupIndex < bank.groups.length; groupIndex += 1) {
+    const group = bank.groups[groupIndex];
+    if (!group || !Array.isArray(group.questions)) {
+      continue;
+    }
+    for (let questionIndex = 0; questionIndex < group.questions.length; questionIndex += 1) {
+      const question = group.questions[questionIndex];
+      if (question && String(question.id) === String(questionId)) {
+        return { groupIndex, questionIndex };
+      }
+    }
+  }
+  return null;
+}
+
+function removeEmptyGroups(bank) {
+  if (!bank || !Array.isArray(bank.groups)) {
+    return bank;
+  }
+  bank.groups = bank.groups.filter((group) => group && Array.isArray(group.questions) && group.questions.length > 0);
+  return bank;
+}
+
+function loadQuestionContext() {
+  const bank = loadQuestionBank();
+  const questions = flattenQuestionBank(bank);
+  const domains = Array.from(new Set(questions.map((question) => question.domain || 'General'))).sort();
+  return {
+    bank,
+    questions,
+    domains,
+    questionCount: questions.length,
+  };
+}
+
+function buildExportPayload(bank, selectedIds) {
+  const includeAll = !selectedIds;
+  const idSet = includeAll ? null : new Set(selectedIds.map((value) => String(value)));
+  const groups = [];
+  if (bank && Array.isArray(bank.groups)) {
+    for (const group of bank.groups) {
+      if (!group || !Array.isArray(group.questions)) {
+        continue;
+      }
+      const filteredQuestions = group.questions
+        .filter((question) => includeAll || (question && idSet && idSet.has(String(question.id))));
+      if (!filteredQuestions.length) {
+        continue;
+      }
+      const exportQuestions = filteredQuestions.map((question) => ({
+        id: question.id ? String(question.id) : undefined,
+        question: (question.question || question.prompt || '').toString(),
+        choices: Array.isArray(question.choices) ? question.choices.map((choice) => choice.toString()) : [],
+        correct_answers: Array.isArray(question.correct_answers)
+          ? Array.from(
+              new Set(
+                question.correct_answers
+                  .map((value) => Number.parseInt(value, 10))
+                  .filter((value) => Number.isInteger(value)),
+              ),
+            ).sort((a, b) => a - b)
+          : [],
+        explanation: normalizeExplanation(question.explanation || question.comment),
+      }));
+      groups.push({
+        id: group.id ? String(group.id) : undefined,
+        domain: (group.domain || 'General').toString().trim() || 'General',
+        context: normalizeExplanation(group.context),
+        questions: exportQuestions,
+      });
+    }
+  }
+  return { version: QUESTION_BANK_VERSION, groups };
+}
+
+function removeQuestionsById(bank, idsToRemove) {
+  if (!bank || !Array.isArray(bank.groups) || !idsToRemove || !idsToRemove.size) {
+    return 0;
+  }
+  let removed = 0;
+  for (const group of bank.groups) {
+    if (!group || !Array.isArray(group.questions)) {
+      continue;
+    }
+    const before = group.questions.length;
+    group.questions = group.questions.filter((question) => !idsToRemove.has(String(question.id)));
+    removed += before - group.questions.length;
+  }
+  removeEmptyGroups(bank);
+  return removed;
+}
+
 function filterQuestionsByParams(questions, domainFilter, searchFilter) {
   const domain = (domainFilter || '').trim();
   const search = (searchFilter || '').trim();
@@ -205,45 +492,139 @@ function parseCorrectAnswersInput(value) {
     .filter((item) => item);
 }
 
-function importQuestions(rawData) {
-  const existing = new Map();
-  for (const question of readJson(QUESTIONS_FILE)) {
-    if (question && question.id) {
-      existing.set(question.id, question);
-    }
+function normalizeIncomingGroup(rawGroup) {
+  if (!rawGroup || typeof rawGroup !== 'object') {
+    return null;
   }
+  const group = {
+    id: rawGroup.id || rawGroup.group_id || rawGroup.groupId || rawGroup.uuid,
+    domain: rawGroup.domain || rawGroup.category || rawGroup.section,
+    context: rawGroup.context || rawGroup.group_context || rawGroup.shared_context,
+    questions: rawGroup.questions || rawGroup.items || rawGroup.data,
+  };
+  return sanitizeGroup(group);
+}
+
+function normalizeQuestionToGroup(rawQuestion) {
+  try {
+    const normalized = normalizeQuestion(rawQuestion);
+    const explanation = normalizeExplanation(rawQuestion.comment || rawQuestion.explanation);
+    const context = normalizeExplanation(rawQuestion.context);
+    const groupId = rawQuestion.group_id || rawQuestion.groupId || rawQuestion.group || null;
+    return sanitizeGroup({
+      id: groupId || `group-${normalized.id}`,
+      domain: normalized.domain,
+      context,
+      questions: [
+        {
+          id: normalized.id,
+          question: normalized.question,
+          choices: normalized.choices,
+          correct_answers: normalized.correct_answers,
+          explanation,
+        },
+      ],
+    });
+  } catch (error) {
+    return null;
+  }
+}
+
+function importQuestions(rawData) {
+  const bank = loadQuestionBank();
+  if (!Array.isArray(bank.groups)) {
+    bank.groups = [];
+  }
+  const groupIndexById = new Map();
+  bank.groups.forEach((group, index) => {
+    if (group && group.id) {
+      groupIndexById.set(String(group.id), index);
+    }
+  });
+
   let imported = 0;
   let updated = 0;
-  let items = [];
+  const incomingGroups = [];
+
   if (Array.isArray(rawData)) {
-    items = rawData;
+    for (const item of rawData) {
+      const group = normalizeQuestionToGroup(item);
+      if (group) {
+        incomingGroups.push(group);
+      }
+    }
   } else if (rawData && typeof rawData === 'object') {
-    if (Array.isArray(rawData.questions)) {
-      items = rawData.questions;
+    let groupCandidates = [];
+    if (Array.isArray(rawData.groups)) {
+      groupCandidates = rawData.groups;
+    } else if (Array.isArray(rawData.question_groups)) {
+      groupCandidates = rawData.question_groups;
     } else if (Array.isArray(rawData.data)) {
-      items = rawData.data;
-    } else if (rawData.questions && typeof rawData.questions === 'object') {
-      items = Object.values(rawData.questions);
+      groupCandidates = rawData.data;
+    } else if (Array.isArray(rawData.questions)) {
+      groupCandidates = rawData.questions;
+    }
+    if (groupCandidates.length) {
+      const looksLikeGroups = groupCandidates.every((item) => item && typeof item === 'object' && (item.questions || item.items || item.data));
+      if (looksLikeGroups) {
+        for (const item of groupCandidates) {
+          const group = normalizeIncomingGroup(item);
+          if (group) {
+            incomingGroups.push(group);
+          }
+        }
+      } else {
+        for (const item of groupCandidates) {
+          const group = normalizeQuestionToGroup(item);
+          if (group) {
+            incomingGroups.push(group);
+          }
+        }
+      }
     }
   }
-  if (!Array.isArray(items)) {
-    throw new Error('Unsupported format. Expected a list of questions.');
+
+  if (!incomingGroups.length) {
+    throw new Error('Unsupported format. Provide groups with questions or a list of questions.');
   }
-  for (const rawQuestion of items) {
-    try {
-      const question = normalizeQuestion(rawQuestion);
-      if (existing.has(question.id)) {
-        existing.set(question.id, question);
+
+  for (const incoming of incomingGroups) {
+    const groupId = incoming.id || crypto.randomUUID();
+    let groupIndex = groupIndexById.get(groupId);
+    if (groupIndex === undefined) {
+      bank.groups.push({ id: groupId, domain: incoming.domain, context: incoming.context, questions: [] });
+      groupIndex = bank.groups.length - 1;
+      groupIndexById.set(groupId, groupIndex);
+    }
+    const targetGroup = bank.groups[groupIndex];
+    targetGroup.domain = incoming.domain;
+    targetGroup.context = incoming.context;
+    if (!Array.isArray(targetGroup.questions)) {
+      targetGroup.questions = [];
+    }
+    for (const question of incoming.questions) {
+      const location = findQuestionLocation(bank, question.id);
+      if (location) {
+        const { groupIndex: existingGroupIndex, questionIndex } = location;
+        const existingGroup = bank.groups[existingGroupIndex];
+        if (existingGroup && Array.isArray(existingGroup.questions)) {
+          if (existingGroupIndex === groupIndex) {
+            existingGroup.questions[questionIndex] = question;
+          } else {
+            existingGroup.questions.splice(questionIndex, 1);
+            targetGroup.questions.push(question);
+          }
+        }
         updated += 1;
       } else {
-        existing.set(question.id, question);
+        targetGroup.questions.push(question);
         imported += 1;
       }
-    } catch (error) {
-      continue;
     }
   }
-  writeJson(QUESTIONS_FILE, Array.from(existing.values()));
+
+  removeEmptyGroups(bank);
+  saveQuestionBank(bank);
   return { imported, updated };
 }
 
@@ -737,12 +1118,12 @@ function renderImport() {
         <div class="card h-100">
           <div class="card-body">
             <h5 class="card-title">Import JSON</h5>
-            <p class="card-text">Paste your questions as JSON or upload a JSON file. Each entry should include the prompt, choices, and the correct answer(s).</p>
+            <p class="card-text">Paste your questions as JSON or upload a JSON file organized into question groups. Each group includes its domain, an optional context, and one or more questions with choices and explanations.</p>
             <form method="post" enctype="multipart/form-data">
               <div class="mb-3">
                 <label for="questions_json" class="form-label">Questions JSON</label>
-                <textarea class="form-control" id="questions_json" name="questions_json" rows="10" placeholder="[{ &quot;question&quot;: ... }] "></textarea>
-                <div class="form-text">The importer accepts the same format as <code>sample_data/sample_questions.json</code>. You can leave this blank when uploading a file.</div>
+                <textarea class="form-control" id="questions_json" name="questions_json" rows="10" placeholder="{ &quot;groups&quot;: [ ... ] }"></textarea>
+                <div class="form-text">See <code>sample_data/sample_question_groups.json</code> for an example structure. You can leave this blank when uploading a file.</div>
               </div>
               <div class="mb-3">
                 <label for="questions_file" class="form-label">Upload JSON file</label>
@@ -876,7 +1257,7 @@ function renderQuestionList({
               </div>
               <div class="col-md-6">
                 <label for="search_filter" class="form-label">Search</label>
-                <input type="search" class="form-control" id="search_filter" name="q" value="${escapeHtml(filterSearch)}" placeholder="Search question text or comment">
+                <input type="search" class="form-control" id="search_filter" name="q" value="${escapeHtml(filterSearch)}" placeholder="Search question text or explanation">
               </div>
               <div class="col-md-2 d-flex gap-2">
                 <button type="submit" class="btn btn-primary flex-grow-1">Filter</button>
@@ -1130,6 +1511,10 @@ function renderQuestionView({ question }) {
   const choiceItems = choices
     .map((choice, index) => `<li class="list-group-item"><strong>${String.fromCharCode(65 + index)}.</strong> ${escapeHtml(choice)}</li>`)
     .join('\n');
+  const contextSection = question.group_context
+    ? `<p><strong>Context:</strong> ${escapeHtml(question.group_context)}</p>`
+    : '';
+  const explanationText = question.explanation || question.comment || '';
   return `
     <div class="row justify-content-center">
       <div class="col-lg-8">
@@ -1137,7 +1522,10 @@ function renderQuestionView({ question }) {
           <div class="card-body">
             <h5 class="card-title">${escapeHtml(question.question)}</h5>
             <p><strong>Domain:</strong> ${escapeHtml(question.domain)}</p>
-            ${question.comment ? `<p><strong>Comment:</strong> ${escapeHtml(question.comment)}</p>` : '<p class="text-muted">No comment provided.</p>'}
+            ${contextSection}
+            ${explanationText
+              ? `<p><strong>Explanation:</strong> ${escapeHtml(explanationText)}</p>`
+              : '<p class="text-muted">No explanation provided.</p>'}
             <h6>Choices</h6>
             <ul class="list-group list-group-flush mb-3">
               ${choiceItems}
@@ -1176,6 +1564,14 @@ function renderQuestionForm({ question, errors }) {
       : (Array.isArray(question.correct_answers) ? question.correct_answers : [])
           .map((index) => String.fromCharCode(65 + index))
           .join(', ');
+  const explanationValue =
+    question.raw_comment !== undefined
+      ? question.raw_comment
+      : (question.explanation !== undefined && question.explanation !== null
+          ? question.explanation
+          : question.comment || '');
+  const contextValue =
+    question.raw_context !== undefined ? question.raw_context : question.group_context || '';
   return `
     <div class="row justify-content-center">
       <div class="col-lg-8">
@@ -1195,6 +1591,11 @@ function renderQuestionForm({ question, errors }) {
                 <input type="text" class="form-control" id="domain" name="domain" value="${escapeHtml(question.domain)}" required>
               </div>
               <div class="mb-3">
+                <label for="context" class="form-label">Context <span class="text-muted">(optional)</span></label>
+                <textarea class="form-control" id="context" name="context" rows="3">${escapeHtml(contextValue)}</textarea>
+                <div class="form-text">Shared stem or background information applied to all questions in this group.</div>
+              </div>
+              <div class="mb-3">
                 <label for="choices" class="form-label">Choices <span class="text-muted">(one per line)</span></label>
                 <textarea class="form-control" id="choices" name="choices" rows="6" required>${escapeHtml(choicesText)}</textarea>
               </div>
@@ -1204,8 +1605,8 @@ function renderQuestionForm({ question, errors }) {
                 <div class="form-text">Use letters (A, B, C) or indices (0, 1, 2). Separate multiple answers with commas.</div>
               </div>
               <div class="mb-3">
-                <label for="comment" class="form-label">Comment</label>
-                <textarea class="form-control" id="comment" name="comment" rows="3">${escapeHtml(question.comment || '')}</textarea>
+                <label for="comment" class="form-label">Explanation <span class="text-muted">(optional)</span></label>
+                <textarea class="form-control" id="comment" name="comment" rows="3">${escapeHtml(explanationValue)}</textarea>
               </div>
               <div class="d-flex gap-2">
                 <button type="submit" class="btn btn-primary">Save Changes</button>
@@ -1281,6 +1682,9 @@ function renderTest({ questions, mode }) {
             <div class="accordion-body">\
               <fieldset>\
                 <legend class="visually-hidden">Question ${index + 1}</legend>\
+                ${question.group_context
+                  ? `<p class="mb-3"><strong>Context:</strong> ${escapeHtml(question.group_context)}</p>`
+                  : ''}\
                 ${choiceItems}\
                 <div class="form-text">Domain: ${escapeHtml(question.domain)}</div>\
               </fieldset>\
@@ -1352,7 +1756,8 @@ function renderResults({ results, score, correctCount, totalQuestions, mode }) {
               ${choiceItems}\
             </ul>\
             <p><strong>Domain:</strong> ${escapeHtml(question.domain)}</p>\
-            ${question.comment ? `<p><strong>Comment:</strong> ${escapeHtml(question.comment)}</p>` : ''}\
+            ${question.group_context ? `<p><strong>Context:</strong> ${escapeHtml(question.group_context)}</p>` : ''}\
+            ${question.explanation || question.comment ? `<p><strong>Explanation:</strong> ${escapeHtml(question.explanation || question.comment)}</p>` : ''}\
           </div>\
         </div>\
       `;
@@ -1562,11 +1967,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname.startsWith('/static/')) {
       const staticPath = path.join(BASE_DIR, pathname);
       if (!staticPath.startsWith(path.join(BASE_DIR, 'static'))) {
+        const { questionCount, domains } = loadQuestionContext();
         sendHtml(res, renderLayout({
           title: 'Not found',
-          questionCount: readJson(QUESTIONS_FILE).length,
+          questionCount,
           wrongCount: loadWrongAnswers().length,
-          domains: [],
+          domains,
           flashMessages,
           body: renderNotFound(),
         }), 404);
@@ -1595,9 +2001,8 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const questions = readJson(QUESTIONS_FILE);
+    const { bank, questions, domains, questionCount } = loadQuestionContext();
     const wrongAnswers = loadWrongAnswers();
-    const domains = Array.from(new Set(questions.map((q) => q.domain || 'General'))).sort();
 
     if (pathname === '/questions' && req.method === 'GET') {
       const perPage = 10;
@@ -1623,7 +2028,7 @@ const server = http.createServer(async (req, res) => {
         res,
         renderLayout({
           title: 'Question Bank · CISSP Test Simulator',
-          questionCount: questions.length,
+          questionCount,
           wrongCount: wrongAnswers.length,
           domains,
           flashMessages,
@@ -1644,11 +2049,12 @@ const server = http.createServer(async (req, res) => {
       const selectAllPages = formData.get('select_all_pages') === '1';
       const redirectUrl = buildQuestionRedirectUrl(pageParam, domainFilter, searchFilter);
       const selectedIds = formData.getAll('selected').filter((value) => value);
-      let exportData = questions;
+      let exportIds = null;
       if (exportMode === 'selected') {
+        let selectedQuestions = [];
         if (selectionScope === 'all' && selectAllPages) {
-          exportData = filterQuestionsByParams(questions, domainFilter, searchFilter);
-          if (!exportData.length) {
+          selectedQuestions = filterQuestionsByParams(questions, domainFilter, searchFilter);
+          if (!selectedQuestions.length) {
             addFlash(session, 'warning', 'No questions match the current filters to export.');
             redirect(res, redirectUrl);
             return;
@@ -1660,15 +2066,17 @@ const server = http.createServer(async (req, res) => {
             return;
           }
           const idSet = new Set(selectedIds);
-          exportData = questions.filter((question) => idSet.has(question.id));
-          if (!exportData.length) {
+          selectedQuestions = questions.filter((question) => idSet.has(question.id));
+          if (!selectedQuestions.length) {
             addFlash(session, 'warning', 'No matching questions were found for the selected items.');
             redirect(res, redirectUrl);
             return;
           }
         }
+        exportIds = selectedQuestions.map((question) => question.id);
       }
-      const payload = JSON.stringify(exportData, null, 2);
+      const exportPayload = buildExportPayload(bank, exportIds);
+      const payload = JSON.stringify(exportPayload, null, 2);
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Content-Disposition', 'attachment; filename="questions_export.json"');
@@ -1689,7 +2097,7 @@ const server = http.createServer(async (req, res) => {
         res,
         renderLayout({
           title: 'View Question · CISSP Test Simulator',
-          questionCount: questions.length,
+          questionCount,
           wrongCount: wrongAnswers.length,
           domains,
           flashMessages,
@@ -1712,7 +2120,7 @@ const server = http.createServer(async (req, res) => {
         res,
         renderLayout({
           title: 'Edit Question · CISSP Test Simulator',
-          questionCount: questions.length,
+          questionCount,
           wrongCount: wrongAnswers.length,
           domains,
           flashMessages,
@@ -1732,6 +2140,12 @@ const server = http.createServer(async (req, res) => {
         redirect(res, '/questions');
         return;
       }
+      const location = findQuestionLocation(bank, id);
+      if (!location) {
+        addFlash(session, 'warning', 'Question not found.');
+        redirect(res, '/questions');
+        return;
+      }
       const questionText = (formData.get('question_text') || '').trim();
       const domain = (formData.get('domain') || '').trim() || 'General';
       const choicesInput = formData.get('choices') || '';
@@ -1739,7 +2153,10 @@ const server = http.createServer(async (req, res) => {
       const correctRawInput = formData.get('correct_answers') || '';
       const correctTokens = parseCorrectAnswersInput(correctRawInput);
       const normalizedCorrect = normalizeCorrectAnswers(correctTokens, choices);
-      const comment = (formData.get('comment') || '').trim();
+      const contextInput = formData.get('context') || '';
+      const contextValue = contextInput.toString().replace(/\r\n/g, '\n').trim();
+      const commentInput = formData.get('comment') || '';
+      const comment = commentInput.toString().replace(/\r\n/g, '\n').trim();
       const errors = [];
       if (!questionText) {
         errors.push('Question text is required.');
@@ -1758,15 +2175,19 @@ const server = http.createServer(async (req, res) => {
           choices,
           correct_answers: normalizedCorrect,
           comment,
+          explanation: comment,
+          group_context: contextValue,
           raw_choices: choicesInput,
           raw_correct_answers: correctRawInput,
+          raw_context: contextInput,
+          raw_comment: commentInput,
         };
         const body = renderQuestionForm({ question: draft, errors });
         sendHtml(
           res,
           renderLayout({
             title: 'Edit Question · CISSP Test Simulator',
-            questionCount: questions.length,
+            questionCount,
             wrongCount: wrongAnswers.length,
             domains,
             flashMessages,
@@ -1775,16 +2196,23 @@ const server = http.createServer(async (req, res) => {
         );
         return;
       }
-      const updated = {
-        ...questions[index],
+      const targetGroup = bank.groups[location.groupIndex];
+      if (!targetGroup || !Array.isArray(targetGroup.questions)) {
+        addFlash(session, 'warning', 'Question not found.');
+        redirect(res, '/questions');
+        return;
+      }
+      targetGroup.domain = domain;
+      targetGroup.context = contextValue;
+      targetGroup.questions[location.questionIndex] = {
+        ...targetGroup.questions[location.questionIndex],
+        id,
         question: questionText,
-        domain,
         choices,
         correct_answers: normalizedCorrect,
-        comment,
+        explanation: comment,
       };
-      questions[index] = updated;
-      writeJson(QUESTIONS_FILE, questions);
+      saveQuestionBank(removeEmptyGroups(bank));
       addFlash(session, 'success', 'Question updated successfully.');
       redirect(res, `/questions/view?id=${encodeURIComponent(id)}`);
       return;
@@ -1796,14 +2224,17 @@ const server = http.createServer(async (req, res) => {
       const id = formData.get('id') || '';
       const pageParam = Number.parseInt(formData.get('page') || '1', 10);
       const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 1;
-      const index = questions.findIndex((item) => item.id === id);
-      if (index === -1) {
+      const location = findQuestionLocation(bank, id);
+      if (!location) {
         addFlash(session, 'warning', 'Question not found.');
         redirect(res, `/questions?page=${page}`);
         return;
       }
-      questions.splice(index, 1);
-      writeJson(QUESTIONS_FILE, questions);
+      const targetGroup = bank.groups[location.groupIndex];
+      if (targetGroup && Array.isArray(targetGroup.questions)) {
+        targetGroup.questions.splice(location.questionIndex, 1);
+      }
+      saveQuestionBank(removeEmptyGroups(bank));
       let wrongModified = false;
       for (let i = wrongAnswers.length - 1; i >= 0; i -= 1) {
         if (wrongAnswers[i] && wrongAnswers[i].question_id === id) {
@@ -1838,18 +2269,17 @@ const server = http.createServer(async (req, res) => {
           return;
         }
         const filteredIds = new Set(filtered.map((question) => question.id));
-        const remainingQuestions = questions.filter((question) => !filteredIds.has(question.id));
-        const removedCount = filteredIds.size;
+        const removedCount = removeQuestionsById(bank, filteredIds);
         if (!removedCount) {
           addFlash(session, 'warning', 'No questions match the current filters to delete.');
           redirect(res, redirectUrl);
           return;
         }
-        writeJson(QUESTIONS_FILE, remainingQuestions);
         const remainingWrongAnswers = wrongAnswers.filter((item) => !filteredIds.has(item.question_id));
         if (remainingWrongAnswers.length !== wrongAnswers.length) {
           saveWrongAnswers(remainingWrongAnswers);
         }
+        saveQuestionBank(bank);
         addFlash(
           session,
           'success',
@@ -1864,18 +2294,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const idSet = new Set(selectedIds);
-      const remainingQuestions = questions.filter((question) => !idSet.has(question.id));
-      const removedCount = questions.length - remainingQuestions.length;
+      const removedCount = removeQuestionsById(bank, idSet);
       if (removedCount === 0) {
         addFlash(session, 'warning', 'No matching questions were found for the selected items.');
         redirect(res, redirectUrl);
         return;
       }
-      writeJson(QUESTIONS_FILE, remainingQuestions);
       const remainingWrongAnswers = wrongAnswers.filter((item) => !idSet.has(item.question_id));
       if (remainingWrongAnswers.length !== wrongAnswers.length) {
         saveWrongAnswers(remainingWrongAnswers);
       }
+      saveQuestionBank(bank);
       addFlash(
         session,
         'success',
@@ -1891,7 +2320,7 @@ const server = http.createServer(async (req, res) => {
         question: questions.find((q) => q.id === item.question_id) || null,
       }));
       const body = renderIndex({
-        questionCount: questions.length,
+        questionCount,
         wrongCount: wrongAnswers.length,
         domains,
         wrongDetails,
@@ -1900,7 +2329,7 @@ const server = http.createServer(async (req, res) => {
         res,
         renderLayout({
           title: 'Dashboard · CISSP Test Simulator',
-          questionCount: questions.length,
+          questionCount,
           wrongCount: wrongAnswers.length,
           domains,
           flashMessages,
@@ -1917,7 +2346,7 @@ const server = http.createServer(async (req, res) => {
           res,
           renderLayout({
             title: 'Import Questions · CISSP Test Simulator',
-            questionCount: questions.length,
+            questionCount,
             wrongCount: wrongAnswers.length,
             domains,
             flashMessages,
@@ -1991,12 +2420,12 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/test/new') {
       if (req.method === 'GET') {
-        const body = renderNewTest({ questionCount: questions.length, domains });
+        const body = renderNewTest({ questionCount, domains });
         sendHtml(
           res,
           renderLayout({
             title: 'New Test · CISSP Test Simulator',
-            questionCount: questions.length,
+            questionCount,
             wrongCount: wrongAnswers.length,
             domains,
             flashMessages,
@@ -2006,7 +2435,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST') {
-        if (questions.length === 0) {
+        if (questionCount === 0) {
           addFlash(session, 'warning', 'Import questions before creating a test.');
           redirect(res, '/import');
           return;
@@ -2048,7 +2477,7 @@ const server = http.createServer(async (req, res) => {
           res,
           renderLayout({
             title: 'Take Test · CISSP Test Simulator',
-            questionCount: questions.length,
+            questionCount,
             wrongCount: wrongAnswers.length,
             domains,
             flashMessages,
@@ -2113,7 +2542,7 @@ const server = http.createServer(async (req, res) => {
         res,
         renderLayout({
           title: 'Results · CISSP Test Simulator',
-          questionCount: questions.length,
+          questionCount,
           wrongCount: wrongAnswers.length,
           domains,
           flashMessages,
@@ -2133,7 +2562,7 @@ const server = http.createServer(async (req, res) => {
           res,
           renderLayout({
             title: 'Review Mistakes · CISSP Test Simulator',
-            questionCount: questions.length,
+            questionCount,
             wrongCount: wrongAnswers.length,
             domains,
             flashMessages,
@@ -2169,7 +2598,7 @@ const server = http.createServer(async (req, res) => {
       res,
       renderLayout({
         title: 'Not found · CISSP Test Simulator',
-        questionCount: questions.length,
+        questionCount,
         wrongCount: wrongAnswers.length,
         domains,
         flashMessages,
