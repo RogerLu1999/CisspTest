@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "groups": [
+    {
+      "id": "sample-group-1",
+      "domain": "Security and Risk Management",
+      "context": "A chief information security officer is establishing a new governance program for the enterprise.",
+      "questions": [
+        {
+          "id": "sample-question-1",
+          "question": "Which governance artifact most clearly defines who is accountable for approving security exceptions?",
+          "choices": [
+            "The incident response plan",
+            "The information security charter",
+            "The data classification standard",
+            "The vulnerability management runbook"
+          ],
+          "correct_answers": [1],
+          "explanation": "The charter establishes the authority and accountability of the security function, including who approves exceptions."
+        }
+      ]
+    },
+    {
+      "id": "sample-group-2",
+      "domain": "Asset Security",
+      "context": "You are advising a product team that manages a multi-tenant cloud analytics platform.",
+      "questions": [
+        {
+          "id": "sample-question-2a",
+          "question": "What is the primary reason to implement tokenization for sensitive customer identifiers stored in the platform?",
+          "choices": [
+            "To reduce the size of the database indexes",
+            "To eliminate the need for user authentication",
+            "To minimize exposure of the original data when queries run",
+            "To allow customers to share decrypted reports securely"
+          ],
+          "correct_answers": [2],
+          "explanation": "Tokenization substitutes the identifiers with non-sensitive values so the original data is not exposed during analytics operations."
+        },
+        {
+          "id": "sample-question-2b",
+          "question": "Which control best ensures that cached analytical datasets remain accurate when source data changes?",
+          "choices": [
+            "Encrypting the cache with hardware security modules",
+            "Applying strict network segmentation to cache servers",
+            "Implementing automated cache invalidation tied to source updates",
+            "Requiring multi-factor authentication for data scientists"
+          ],
+          "correct_answers": [2],
+          "explanation": "Invalidation linked to source system updates refreshes cached data promptly, maintaining accuracy for tenant reports."
+        }
+      ]
+    }
+  ]
+}

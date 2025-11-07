@@ -27,7 +27,7 @@ A lightweight Node.js web application for managing CISSP-style practice question
 
 3. **Import sample questions (optional)**
 
-Use the provided [`sample_data/sample_questions.json`](sample_data/sample_questions.json) file to populate the question bank. Copy the JSON payload into the importer form.
+Use the provided [`sample_data/sample_question_groups.json`](sample_data/sample_question_groups.json) file to populate the question bank. Copy the JSON payload into the importer form.
 
 To import a transcript that lists all questions before their answers:
 
@@ -36,25 +36,44 @@ To import a transcript that lists all questions before their answers:
 3. Add an <strong>Answers</strong> (or <strong>答案</strong>) heading near the end and list each answer starting with its number, followed by the correct option and any explanation.
 4. Provide the domain that should apply to the entire batch.
 
-The importer automatically associates the answer key entries with their matching questions, keeps shared scenarios intact, and saves the explanations as comments.
+The importer automatically associates the answer key entries with their matching questions, keeps shared scenarios intact, and saves the explanations alongside the questions.
 
 ## Question JSON format
 
-Each question entry should resemble the following structure:
+The importer expects question **groups**. Each group belongs to a single domain, may include an optional shared context, and contains one or more questions. A minimal example looks like this:
 
 ```json
 {
-  "question": "Which security control is considered preventative?",
-  "choices": ["Security camera", "Security guard", "Encryption", "Audit log"],
-  "answer": "C",
-  "domain": "Security and Risk Management",
-  "comment": "Encryption prevents unauthorized disclosure."
+  "version": 2,
+  "groups": [
+    {
+      "id": "example-group",
+      "domain": "Security and Risk Management",
+      "context": "You are advising an enterprise on how to build its governance program.",
+      "questions": [
+        {
+          "id": "example-question-1",
+          "question": "Which artifact establishes accountability for approving security exceptions?",
+          "choices": [
+            "Incident response plan",
+            "Information security charter",
+            "Data classification guideline",
+            "Patch management runbook"
+          ],
+          "correct_answers": [1],
+          "explanation": "The charter grants the security function its authority, including who signs off on exceptions."
+        }
+      ]
+    }
+  ]
 }
 ```
 
-- `answer` may be a letter (A, B, C, ...), the exact choice text, the index of the correct option (0-based), or an array of any of these values for multi-answer questions.
-- If an `id` is omitted, one will be generated deterministically from the prompt so that re-imports update the original record.
+- `correct_answers` is a list of **0-based** indices referencing the `choices` array. Multiple indices indicate a multi-select question.
+- `context` is optional. When provided, it is shown above every question in the group.
+- `explanation` stores the official rationale that appears after submitting a test or viewing the question details.
+- Group and question `id` values are optional. When omitted, deterministic identifiers are generated from the content so that re-imports update the same records.
 
 ## Data storage
 
-Imported questions are saved under `data/questions.json`. Any missed questions are tracked in `data/wrong_questions.json`. Both files are standard JSON and can be backed up or edited manually as needed.
+Imported questions are saved under `data/questions.json` as the grouped structure shown above. Any missed questions are tracked in `data/wrong_questions.json`. Both files are standard JSON and can be backed up or edited manually as needed.
