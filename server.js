@@ -12,6 +12,11 @@ const QUESTION_BANK_VERSION = 2;
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8000;
 
+const QWEN_API_URL =
+  process.env.QWEN_API_URL || 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation';
+const QWEN_MODEL = process.env.QWEN_MODEL || 'qwen-turbo';
+const QWEN_API_KEY = process.env.QWEN_API_KEY || '';
+
 const DNS_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
 const sessions = new Map();
@@ -748,6 +753,336 @@ function importQuestions(rawData) {
   return { imported, updated };
 }
 
+function normalizeAiChoices(rawChoices) {
+  if (!rawChoices) {
+    return [];
+  }
+  if (Array.isArray(rawChoices)) {
+    const normalized = [];
+    for (const choice of rawChoices) {
+      if (choice === undefined || choice === null) {
+        continue;
+      }
+      if (typeof choice === 'string' || typeof choice === 'number') {
+        const value = choice.toString().trim();
+        if (value) {
+          normalized.push(value);
+        }
+        continue;
+      }
+      if (typeof choice === 'object') {
+        if (typeof choice.text === 'string' && choice.text.trim()) {
+          normalized.push(choice.text.trim());
+          continue;
+        }
+        if (typeof choice.value === 'string' || typeof choice.value === 'number') {
+          const value = choice.value.toString().trim();
+          if (value) {
+            normalized.push(value);
+          }
+          continue;
+        }
+        if (typeof choice.option === 'string' && choice.option.trim()) {
+          normalized.push(choice.option.trim());
+          continue;
+        }
+        if (typeof choice.content === 'string' && choice.content.trim()) {
+          normalized.push(choice.content.trim());
+          continue;
+        }
+        if (typeof choice.label === 'string' && choice.label.trim()) {
+          normalized.push(choice.label.trim());
+        }
+      }
+    }
+    return normalized;
+  }
+  if (typeof rawChoices === 'object') {
+    const entries = Object.entries(rawChoices)
+      .map(([key, value]) => ({ key, value }))
+      .sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true, sensitivity: 'base' }));
+    const normalized = [];
+    for (const entry of entries) {
+      if (entry.value === undefined || entry.value === null) {
+        continue;
+      }
+      const value = Array.isArray(entry.value) ? entry.value.join(' ') : entry.value.toString();
+      const trimmed = value.trim();
+      if (trimmed) {
+        normalized.push(trimmed);
+      }
+    }
+    return normalized;
+  }
+  return [];
+}
+
+function unwrapAiAnswerValue(value) {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    if (value.length && value.every((item) => item && typeof item === 'object')) {
+      const flattened = [];
+      for (const item of value) {
+        if (item === undefined || item === null) {
+          continue;
+        }
+        if (typeof item === 'string' || typeof item === 'number') {
+          flattened.push(item);
+          continue;
+        }
+        if (typeof item.label === 'string') {
+          flattened.push(item.label);
+          continue;
+        }
+        if (typeof item.value === 'string' || typeof item.value === 'number') {
+          flattened.push(item.value);
+          continue;
+        }
+        if (typeof item.text === 'string') {
+          flattened.push(item.text);
+        }
+      }
+      if (flattened.length) {
+        return flattened;
+      }
+    }
+    return value;
+  }
+  if (typeof value === 'object') {
+    if (Array.isArray(value.letters)) {
+      return value.letters;
+    }
+    if (Array.isArray(value.indices)) {
+      return value.indices;
+    }
+    if (Array.isArray(value.indexes)) {
+      return value.indexes;
+    }
+    if (value.letter !== undefined) {
+      return [value.letter];
+    }
+    if (value.index !== undefined) {
+      return [value.index];
+    }
+    if (value.value !== undefined) {
+      return Array.isArray(value.value) ? value.value : [value.value];
+    }
+    if (value.text !== undefined) {
+      return [value.text];
+    }
+  }
+  return value;
+}
+
+function extractAiAnswerValue(candidate) {
+  if (!candidate || typeof candidate !== 'object') {
+    return undefined;
+  }
+  const answerKeys = [
+    'correct_answers',
+    'correct_answer',
+    'answers',
+    'answer',
+    'correct',
+    'key',
+    'correctOption',
+    'correct_option',
+    'answer_letters',
+    'answerLetter',
+    'answer_letter',
+    'answer_key',
+    'correct_choice',
+  ];
+  for (const key of answerKeys) {
+    if (key in candidate) {
+      return unwrapAiAnswerValue(candidate[key]);
+    }
+  }
+  if (candidate.solution && typeof candidate.solution === 'object') {
+    return unwrapAiAnswerValue(candidate.solution.answer || candidate.solution.correct);
+  }
+  if (typeof candidate.solution === 'string') {
+    return candidate.solution;
+  }
+  return undefined;
+}
+
+function resolveDomainInput(selection, customValue, fallback = 'General') {
+  const trimmedSelection = (selection || '').trim();
+  const trimmedCustom = (customValue || '').trim();
+  if (trimmedSelection === '__custom__') {
+    return trimmedCustom || fallback;
+  }
+  if (trimmedSelection) {
+    return trimmedSelection;
+  }
+  if (trimmedCustom) {
+    return trimmedCustom;
+  }
+  return fallback;
+}
+
+async function callQwenStructuredImport(rawText, domain) {
+  if (!QWEN_API_KEY || !QWEN_API_KEY.trim()) {
+    throw new Error('Set the QWEN_API_KEY environment variable to enable AI-assisted imports.');
+  }
+  if (!rawText || !rawText.trim()) {
+    throw new Error('Provide source text for AI import.');
+  }
+  if (typeof fetch !== 'function') {
+    throw new Error('The current runtime does not support fetch, which is required for AI imports.');
+  }
+  const instructions = [
+    'You are given CISSP-style multiple choice questions followed by their answers.',
+    'Return strict JSON matching this schema:',
+    '{ "questions": [ { "question": "...", "choices": ["..."], "answers": ["A"], "explanation": "..." } ] }.',
+    'Each question must include the full text, an ordered list of choices, and the correct answer letters.',
+    'Preserve the original ordering of the questions.',
+    'Do not include any text outside of the JSON structure.',
+  ].join(' ');
+  const payload = {
+    model: QWEN_MODEL,
+    input: {
+      prompt: `${instructions}\n\nDomain: ${domain || 'General'}\n\nInput:\n${rawText.trim()}`,
+    },
+  };
+  let response;
+  try {
+    response = await fetch(QWEN_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${QWEN_API_KEY}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    throw new Error(`Failed to reach the Qwen service: ${error.message}`);
+  }
+  const errorText = !response.ok ? await response.text().catch(() => '') : '';
+  if (!response.ok) {
+    const preview = errorText ? `: ${errorText.slice(0, 300)}` : '';
+    throw new Error(`Qwen request failed with status ${response.status}${preview}`);
+  }
+  let data;
+  try {
+    data = await response.json();
+  } catch (error) {
+    throw new Error(`Unable to parse Qwen response as JSON: ${error.message}`);
+  }
+  if (data && typeof data === 'object' && Array.isArray(data.questions)) {
+    return data;
+  }
+  let content = '';
+  if (data && typeof data === 'object') {
+    if (typeof data.output === 'string') {
+      content = data.output;
+    } else if (data.output && typeof data.output.text === 'string') {
+      content = data.output.text;
+    } else if (Array.isArray(data.output?.choices) && data.output.choices.length) {
+      const choice = data.output.choices[0];
+      if (choice && typeof choice.text === 'string') {
+        content = choice.text;
+      }
+    } else if (Array.isArray(data.choices) && data.choices.length) {
+      const choice = data.choices[0];
+      if (choice && typeof choice.message?.content === 'string') {
+        content = choice.message.content;
+      } else if (typeof choice.text === 'string') {
+        content = choice.text;
+      }
+    }
+  }
+  if (!content) {
+    throw new Error('Qwen response did not include any text to parse.');
+  }
+  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  const jsonText = jsonMatch ? jsonMatch[0] : content;
+  try {
+    return JSON.parse(jsonText);
+  } catch (error) {
+    throw new Error('Failed to parse the structured JSON returned by Qwen.');
+  }
+}
+
+async function prepareAiImportFromRaw(rawText, domain) {
+  const effectiveDomain = domain && domain.trim() ? domain.trim() : 'General';
+  const parsed = await callQwenStructuredImport(rawText, effectiveDomain);
+  let candidates = [];
+  if (Array.isArray(parsed)) {
+    candidates = parsed;
+  } else if (parsed && typeof parsed === 'object') {
+    if (Array.isArray(parsed.questions)) {
+      candidates = parsed.questions;
+    } else if (parsed.data && Array.isArray(parsed.data.questions)) {
+      candidates = parsed.data.questions;
+    } else if (Array.isArray(parsed.items)) {
+      candidates = parsed.items;
+    }
+  }
+  if (!candidates.length) {
+    throw new Error('Qwen did not return any questions to import.');
+  }
+  const importPayload = [];
+  const previewQuestions = [];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') {
+      continue;
+    }
+    const questionText = (candidate.question || candidate.prompt || candidate.text || '').toString().trim();
+    if (!questionText) {
+      throw new Error('One of the AI-generated questions is missing its text.');
+    }
+    const rawChoices =
+      candidate.choices ||
+      candidate.options ||
+      candidate.choice_list ||
+      candidate.option_list ||
+      (candidate.answers && candidate.answers.options);
+    const choices = normalizeAiChoices(rawChoices);
+    if (choices.length < 2) {
+      throw new Error(`AI response for "${questionText}" is missing multiple choices.`);
+    }
+    const comment = normalizeExplanation(
+      candidate.explanation || candidate.comment || candidate.rationale || candidate.analysis || '',
+    );
+    const answersValue = extractAiAnswerValue(candidate);
+    let normalized;
+    try {
+      normalized = normalizeQuestion({
+        id: candidate.id,
+        question: questionText,
+        choices,
+        correct_answers: answersValue,
+        domain: effectiveDomain,
+        comment,
+      });
+    } catch (error) {
+      throw new Error(`Unable to normalize AI question "${questionText}": ${error.message}`);
+    }
+    importPayload.push({
+      id: normalized.id,
+      question: normalized.question,
+      choices: normalized.choices,
+      correct_answers: normalized.correct_answers,
+      domain: normalized.domain,
+      comment: normalized.comment,
+    });
+    previewQuestions.push({
+      question: normalized.question,
+      choices: normalized.choices,
+      answerLetters: normalized.correct_answers.map((index) => String.fromCharCode(65 + index)),
+      comment: normalized.comment,
+    });
+  }
+  if (!importPayload.length) {
+    throw new Error('No valid questions were produced from the AI response.');
+  }
+  return { importPayload, previewQuestions, domain: effectiveDomain };
+}
+
 function joinAndNormalizeLines(lines) {
   const compacted = lines
     .join('\n')
@@ -1231,10 +1566,109 @@ function renderIndex({ questionCount, wrongCount, domains, wrongDetails }) {
   `;
 }
 
-function renderImport() {
+function buildDomainOptions(domains, selectedValue) {
+  const normalized = new Set();
+  normalized.add('General');
+  for (const domain of domains) {
+    if (!domain) {
+      continue;
+    }
+    const value = domain.toString().trim();
+    if (value) {
+      normalized.add(value);
+    }
+  }
+  const sorted = Array.from(normalized).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  const effectiveSelected = selectedValue === '__custom__' ? '__custom__' : (selectedValue || 'General');
+  const options = sorted
+    .map((domain) => {
+      const selected = effectiveSelected !== '__custom__' && domain === effectiveSelected ? ' selected' : '';
+      return `<option value="${escapeHtml(domain)}"${selected}>${escapeHtml(domain)}</option>`;
+    })
+    .join('\n');
+  const customSelected = effectiveSelected === '__custom__' ? ' selected' : '';
+  return `${options}\n<option value="__custom__"${customSelected}>Other (custom domain)</option>`;
+}
+
+function renderImport({
+  domains = [],
+  structuredSelectedDomain = 'General',
+  structuredCustomDomain = '',
+  aiSelectedDomain = 'General',
+  aiCustomDomain = '',
+  aiSourceText = '',
+  aiPreview = null,
+  qwenEnabled = false,
+} = {}) {
+  const structuredOptions = buildDomainOptions(domains, structuredSelectedDomain);
+  const structuredCustomValue = structuredSelectedDomain === '__custom__' ? structuredCustomDomain : '';
+  const aiOptions = buildDomainOptions(domains, aiSelectedDomain);
+  const aiCustomValue = aiSelectedDomain === '__custom__' ? aiCustomDomain : '';
+  const aiSourceValue = aiSourceText || '';
+  const aiDisabledAttr = qwenEnabled ? '' : ' disabled';
+  const aiNotice = qwenEnabled
+    ? ''
+    : '<div class="alert alert-warning mt-3" role="alert">Set the <code>QWEN_API_KEY</code> environment variable to enable AI-assisted imports.</div>';
+  const previewSection = aiPreview
+    ? (() => {
+        const items = (aiPreview.questions || [])
+          .map((item, index) => {
+            const choiceItems = Array.isArray(item.choices)
+              ? item.choices
+                  .map((choice, choiceIndex) => {
+                    const label = String.fromCharCode(65 + choiceIndex);
+                    return `<li><span class="fw-semibold">${escapeHtml(label)}.</span> ${escapeHtml(choice)}</li>`;
+                  })
+                  .join('\n')
+              : '';
+            const explanation = item.comment
+              ? `<p class="mb-0"><strong>Explanation:</strong> ${escapeHtml(item.comment)}</p>`
+              : '';
+            return `
+              <div class="mb-4">
+                <h6 class="fw-semibold">Question ${index + 1}</h6>
+                <p>${escapeHtml(item.question || '')}</p>
+                <ol class="mb-2 ps-3" type="A">
+                  ${choiceItems}
+                </ol>
+                <p class="mb-1"><strong>Correct:</strong> ${escapeHtml((item.answerLetters || []).join(', '))}</p>
+                ${explanation}
+              </div>
+            `;
+          })
+          .join('\n');
+        const questionCount = Array.isArray(aiPreview.questions) ? aiPreview.questions.length : 0;
+        const payloadValue = aiPreview.payload ? escapeHtml(aiPreview.payload) : '';
+        const originalText = aiPreview.source
+          ? `
+            <details class="mt-3">
+              <summary>Show original text</summary>
+              <pre class="mt-2 bg-light p-3 rounded border">${escapeHtml(aiPreview.source)}</pre>
+            </details>
+          `
+          : '';
+        return `
+          <div class="card mt-4">
+            <div class="card-body">
+              <h5 class="card-title">Review AI parsed questions</h5>
+              <p class="card-text">Confirm the ${escapeHtml(String(questionCount))} question${questionCount === 1 ? '' : 's'} extracted by Qwen for the <strong>${escapeHtml(aiPreview.domain || 'General')}</strong> domain.</p>
+              ${items}
+              <form method="post" class="mt-3">
+                <input type="hidden" name="import_mode" value="ai_confirm">
+                <input type="hidden" name="ai_payload" value="${payloadValue}">
+                <button type="submit" class="btn btn-success">Import ${escapeHtml(String(questionCount))} Question${questionCount === 1 ? '' : 's'}</button>
+                <a class="btn btn-outline-secondary ms-2" href="/import">Cancel</a>
+              </form>
+              ${originalText}
+            </div>
+          </div>
+        `;
+      })()
+    : '';
+
   return `
     <div class="row g-4">
-      <div class="col-lg-6">
+      <div class="col-xl-4 col-lg-6">
         <div class="card h-100">
           <div class="card-body">
             <h5 class="card-title">Import JSON</h5>
@@ -1255,7 +1689,7 @@ function renderImport() {
           </div>
         </div>
       </div>
-      <div class="col-lg-6">
+      <div class="col-xl-4 col-lg-6">
         <div class="card h-100">
           <div class="card-body">
             <h5 class="card-title">Import from structured text</h5>
@@ -1263,7 +1697,10 @@ function renderImport() {
             <form method="post">
               <div class="mb-3">
                 <label for="batch_domain" class="form-label">Domain for this batch</label>
-                <input type="text" class="form-control" id="batch_domain" name="batch_domain" placeholder="e.g. Security and Risk Management">
+                <select class="form-select" id="batch_domain" name="batch_domain">
+                  ${structuredOptions}
+                </select>
+                <input type="text" class="form-control mt-2" id="batch_domain_custom" name="custom_domain" placeholder="Custom domain" value="${escapeHtml(structuredCustomValue || '')}">
                 <div class="form-text">The selected domain is applied to every question imported from this text.</div>
               </div>
               <div class="mb-3">
@@ -1276,7 +1713,34 @@ function renderImport() {
           </div>
         </div>
       </div>
+      <div class="col-xl-4 col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title">AI-assisted import (Qwen)</h5>
+            <p class="card-text">Let Qwen analyze raw question and answer text to produce structured questions that you can review before importing.</p>
+            <form method="post">
+              <input type="hidden" name="import_mode" value="ai_prepare">
+              <div class="mb-3">
+                <label for="ai_domain" class="form-label">Domain</label>
+                <select class="form-select" id="ai_domain" name="ai_domain"${aiDisabledAttr}>
+                  ${aiOptions}
+                </select>
+                <input type="text" class="form-control mt-2" id="ai_custom_domain" name="ai_custom_domain" placeholder="Custom domain" value="${escapeHtml(aiCustomValue || '')}"${aiDisabledAttr}>
+                <div class="form-text">All questions in this batch will use the selected domain.</div>
+              </div>
+              <div class="mb-3">
+                <label for="ai_source" class="form-label">Raw questions &amp; answers</label>
+                <textarea class="form-control" id="ai_source" name="ai_source" rows="12" placeholder="Questions listed first, followed by the answer key."${aiDisabledAttr}>${escapeHtml(aiSourceValue)}</textarea>
+                <div class="form-text">Provide the questions together followed by their answers. The assistant will match answers using the question numbers.</div>
+              </div>
+              <button type="submit" class="btn btn-primary"${aiDisabledAttr}>Analyze with Qwen</button>
+            </form>
+            ${aiNotice}
+          </div>
+        </div>
+      </div>
     </div>
+    ${previewSection}
   `;
 }
 
@@ -2584,7 +3048,10 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/import') {
       if (req.method === 'GET') {
-        const body = renderImport();
+        const body = renderImport({
+          domains,
+          qwenEnabled: Boolean(QWEN_API_KEY && QWEN_API_KEY.trim()),
+        });
         sendHtml(
           res,
           renderLayout({
@@ -2604,6 +3071,12 @@ const server = http.createServer(async (req, res) => {
         let payloadText = '';
         let textImport = '';
         let batchDomain = '';
+        let customDomain = '';
+        let importMode = 'standard';
+        let aiDomain = '';
+        let aiCustomDomain = '';
+        let aiSource = '';
+        let aiPayload = '';
         if (/^multipart\/form-data/i.test(contentType)) {
           const boundaryMatch = contentType.match(/boundary="?([^";]+)"?/i);
           const boundary = boundaryMatch ? boundaryMatch[1] : '';
@@ -2623,16 +3096,115 @@ const server = http.createServer(async (req, res) => {
           if (parsed.fields.has('batch_domain')) {
             batchDomain = parsed.fields.get('batch_domain') || '';
           }
+          if (parsed.fields.has('custom_domain')) {
+            customDomain = parsed.fields.get('custom_domain') || '';
+          }
+          if (parsed.fields.has('import_mode')) {
+            importMode = parsed.fields.get('import_mode') || 'standard';
+          }
+          if (parsed.fields.has('ai_domain')) {
+            aiDomain = parsed.fields.get('ai_domain') || '';
+          }
+          if (parsed.fields.has('ai_custom_domain')) {
+            aiCustomDomain = parsed.fields.get('ai_custom_domain') || '';
+          }
+          if (parsed.fields.has('ai_source')) {
+            aiSource = parsed.fields.get('ai_source') || '';
+          }
+          if (parsed.fields.has('ai_payload')) {
+            aiPayload = parsed.fields.get('ai_payload') || '';
+          }
         } else {
           const formData = new URLSearchParams(bodyBuffer.toString());
           payloadText = formData.get('questions_json') || '';
           textImport = formData.get('questions_text') || '';
           batchDomain = formData.get('batch_domain') || '';
+          customDomain = formData.get('custom_domain') || '';
+          importMode = formData.get('import_mode') || 'standard';
+          aiDomain = formData.get('ai_domain') || '';
+          aiCustomDomain = formData.get('ai_custom_domain') || '';
+          aiSource = formData.get('ai_source') || '';
+          aiPayload = formData.get('ai_payload') || '';
+        }
+        const trimmedAiSource = (aiSource || '').trim();
+        const aiDomainValue = resolveDomainInput(aiDomain, aiCustomDomain, '');
+        if (importMode === 'ai_confirm') {
+          const trimmedPayload = (aiPayload || '').trim();
+          if (!trimmedPayload) {
+            addFlash(session, 'danger', 'The AI preview payload was missing. Please run the analysis again.');
+            redirect(res, '/import');
+            return;
+          }
+          try {
+            const parsed = JSON.parse(trimmedPayload);
+            const stats = importQuestions(parsed);
+            addFlash(session, 'success', `Imported ${stats.imported} questions, updated ${stats.updated}.`);
+            redirect(res, '/');
+          } catch (error) {
+            addFlash(session, 'danger', `Failed to import AI results: ${error.message}`);
+            redirect(res, '/import');
+          }
+          return;
+        }
+        if (importMode === 'ai_prepare') {
+          if (!trimmedAiSource) {
+            addFlash(session, 'danger', 'Provide the raw questions and answers before running the AI import.');
+            redirect(res, '/import');
+            return;
+          }
+          if (!aiDomainValue) {
+            addFlash(session, 'danger', 'Select or enter a domain for the AI import.');
+            redirect(res, '/import');
+            return;
+          }
+          try {
+            const result = await prepareAiImportFromRaw(trimmedAiSource, aiDomainValue);
+            const aiSelectValue =
+              aiDomain === '__custom__' || (!aiDomain && aiCustomDomain)
+                ? '__custom__'
+                : result.domain;
+            const aiCustomValueForForm = aiSelectValue === '__custom__' ? result.domain : '';
+            const previewBody = renderImport({
+              domains,
+              qwenEnabled: Boolean(QWEN_API_KEY && QWEN_API_KEY.trim()),
+              structuredSelectedDomain: batchDomain || 'General',
+              structuredCustomDomain: batchDomain === '__custom__' ? customDomain : '',
+              aiSelectedDomain: aiSelectValue,
+              aiCustomDomain: aiCustomValueForForm,
+              aiSourceText: trimmedAiSource,
+              aiPreview: {
+                domain: result.domain,
+                questions: result.previewQuestions,
+                payload: JSON.stringify(result.importPayload),
+                source: trimmedAiSource,
+              },
+            });
+            flashMessages.push({
+              category: 'info',
+              message: 'Review the extracted questions below before importing them.',
+            });
+            sendHtml(
+              res,
+              renderLayout({
+                title: 'Import Questions · CISSP Test Simulator',
+                questionCount,
+                wrongCount: wrongAnswers.length,
+                domains,
+                flashMessages,
+                body: previewBody,
+              }),
+            );
+          } catch (error) {
+            addFlash(session, 'danger', `Failed to analyze questions with Qwen: ${error.message}`);
+            redirect(res, '/import');
+          }
+          return;
         }
         const trimmedTextImport = (textImport || '').trim();
         if (trimmedTextImport) {
           try {
-            const prepared = parseStructuredTextImport(trimmedTextImport, batchDomain);
+            const structuredDomain = resolveDomainInput(batchDomain, customDomain);
+            const prepared = parseStructuredTextImport(trimmedTextImport, structuredDomain);
             const stats = importQuestions(prepared);
             addFlash(session, 'success', `Imported ${stats.imported} questions, updated ${stats.updated}.`);
             redirect(res, '/');
