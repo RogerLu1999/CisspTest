@@ -5,7 +5,7 @@ A lightweight Node.js web application for managing CISSP-style practice question
 ## Features
 
 - Import questions from local JSON files and persist them to disk.
-- Import long-form exam dumps where questions appear first and the answer key follows at the end.
+- Use the AI-assisted importer to transform raw exam dumps into structured question groups you can review and edit before saving.
 - Build randomized practice tests with optional domain filters.
 - Take tests in the browser, receive instant scoring, and view detailed explanations.
 - Track questions answered incorrectly and automatically create review sessions from them.
@@ -29,14 +29,13 @@ A lightweight Node.js web application for managing CISSP-style practice question
 
 Use the provided [`sample_data/sample_question_groups.json`](sample_data/sample_question_groups.json) file to populate the question bank. Copy the JSON payload into the importer form.
 
-To import a transcript that lists all questions before their answers:
+To import a transcript with the AI-assisted workflow:
 
-1. Paste the passage into the <strong>Import from structured text</strong> form.
-2. Keep the questions in order (1, 2, 3, …) with their answer choices (A, B, C, …).
-3. Add an <strong>Answers</strong> (or <strong>答案</strong>) heading near the end and list each answer starting with its number, followed by the correct option and any explanation.
-4. Provide the domain that should apply to the entire batch.
+1. Paste the source text into the <strong>AI-assisted import (Qwen)</strong> form and select a domain (or choose “Other” to enter a custom value).
+2. Optionally provide additional instructions to highlight tricky sections, request richer explanations, or describe how questions should be grouped.
+3. Review the parsed groups, adjust the generated JSON payload directly in the preview, and submit the import when everything looks correct.
 
-The importer automatically associates the answer key entries with their matching questions, keeps shared scenarios intact, and saves the explanations alongside the questions.
+The preview exposes the JSON returned by Qwen so you can make last-minute tweaks before saving the questions.
 
 ## Question JSON format
 
