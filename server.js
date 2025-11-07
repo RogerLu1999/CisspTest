@@ -19,6 +19,17 @@ const QWEN_API_KEY = process.env.DASHSCOPE_API_KEY || '';
 
 const DNS_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
+const DOMAIN_OPTIONS = [
+  'Security and Risk Management',
+  'Asset Security',
+  'Security Architecture and Engineering',
+  'Communication and Network Security',
+  'Identity and Access Management (IAM)',
+  'Security Assessment and Testing',
+  'Security Operations',
+  'Software Development Security',
+];
+
 const sessions = new Map();
 
 function ensureDir(dirPath) {
@@ -2379,7 +2390,7 @@ function renderQuestionView({ question }) {
   `;
 }
 
-function renderQuestionForm({ question, errors }) {
+function renderQuestionForm({ question, errors, domainOptions }) {
   const errorAlert = (errors && errors.length)
     ? `
         <div class="alert alert-danger" role="alert">
@@ -2406,6 +2417,15 @@ function renderQuestionForm({ question, errors }) {
           : question.comment || '');
   const contextValue =
     question.raw_context !== undefined ? question.raw_context : question.group_context || '';
+  const availableDomains = Array.isArray(domainOptions) && domainOptions.length ? domainOptions : DOMAIN_OPTIONS;
+  const currentDomain = question.domain || '';
+  const domainOptionsHtml = availableDomains
+    .map((domain) => {
+      const selected = domain === currentDomain ? ' selected' : '';
+      return `<option value="${escapeHtml(domain)}"${selected}>${escapeHtml(domain)}</option>`;
+    })
+    .join('\n');
+  const placeholderSelected = currentDomain && availableDomains.includes(currentDomain) ? '' : ' selected';
   return `
     <div class="row justify-content-center">
       <div class="col-lg-8">
@@ -2422,7 +2442,10 @@ function renderQuestionForm({ question, errors }) {
               </div>
               <div class="mb-3">
                 <label for="domain" class="form-label">Domain</label>
-                <input type="text" class="form-control" id="domain" name="domain" value="${escapeHtml(question.domain)}" required>
+                <select class="form-select" id="domain" name="domain" required>
+                  <option value="" disabled${placeholderSelected}>Select a domain</option>
+                  ${domainOptionsHtml}
+                </select>
               </div>
               <div class="mb-3">
                 <label for="context" class="form-label">Context <span class="text-muted">(optional)</span></label>
@@ -2978,7 +3001,7 @@ const server = http.createServer(async (req, res) => {
         redirect(res, '/questions');
         return;
       }
-      const body = renderQuestionForm({ question, errors: [] });
+      const body = renderQuestionForm({ question, errors: [], domainOptions: DOMAIN_OPTIONS });
       sendHtml(
         res,
         renderLayout({
@@ -3010,7 +3033,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const questionText = (formData.get('question_text') || '').trim();
-      const domain = (formData.get('domain') || '').trim() || 'General';
+      const domainInput = (formData.get('domain') || '').trim();
+      const domain = DOMAIN_OPTIONS.includes(domainInput) ? domainInput : '';
       const choicesInput = formData.get('choices') || '';
       const choices = parseChoicesInput(choicesInput);
       const correctRawInput = formData.get('correct_answers') || '';
@@ -3030,11 +3054,14 @@ const server = http.createServer(async (req, res) => {
       if (!normalizedCorrect.length) {
         errors.push('Specify at least one correct answer.');
       }
+      if (!domain) {
+        errors.push('Select a domain from the list.');
+      }
       if (errors.length) {
         const draft = {
           ...questions[index],
           question: questionText,
-          domain,
+          domain: domainInput,
           choices,
           correct_answers: normalizedCorrect,
           comment,
@@ -3045,7 +3072,7 @@ const server = http.createServer(async (req, res) => {
           raw_context: contextInput,
           raw_comment: commentInput,
         };
-        const body = renderQuestionForm({ question: draft, errors });
+        const body = renderQuestionForm({ question: draft, errors, domainOptions: DOMAIN_OPTIONS });
         sendHtml(
           res,
           renderLayout({
