@@ -15,7 +15,7 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 8000;
 const QWEN_API_URL =
   process.env.QWEN_API_URL || 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation';
 const QWEN_MODEL = process.env.QWEN_MODEL || 'qwen-turbo';
-const QWEN_API_KEY = process.env.QWEN_API_KEY || '';
+const QWEN_API_KEY = process.env.DASHSCOPE_API_KEY || '';
 
 const DNS_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
@@ -926,7 +926,7 @@ function resolveDomainInput(selection, customValue, fallback = 'General') {
 
 async function callQwenStructuredImport(rawText, domain) {
   if (!QWEN_API_KEY || !QWEN_API_KEY.trim()) {
-    throw new Error('Set the QWEN_API_KEY environment variable to enable AI-assisted imports.');
+    throw new Error('Set the DASHSCOPE_API_KEY environment variable to enable AI-assisted imports.');
   }
   if (!rawText || !rawText.trim()) {
     throw new Error('Provide source text for AI import.');
@@ -1608,7 +1608,7 @@ function renderImport({
   const aiDisabledAttr = qwenEnabled ? '' : ' disabled';
   const aiNotice = qwenEnabled
     ? ''
-    : '<div class="alert alert-warning mt-3" role="alert">Set the <code>QWEN_API_KEY</code> environment variable to enable AI-assisted imports.</div>';
+    : '<div class="alert alert-warning mt-3" role="alert">Set the <code>DASHSCOPE_API_KEY</code> environment variable to enable AI-assisted imports.</div>';
   const previewSection = aiPreview
     ? (() => {
         const items = (aiPreview.questions || [])
