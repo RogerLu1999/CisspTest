@@ -1525,28 +1525,47 @@ function updateWrongAnswers(questionId, selectedIndices, isCorrect) {
       lookup.set(item.question_id, item);
     }
   }
-  if (isCorrect) {
-    if (lookup.has(questionId)) {
-      lookup.delete(questionId);
-      saveWrongAnswers(Array.from(lookup.values()));
-    }
-    return;
-  }
+  const timestamp = new Date().toISOString();
   if (lookup.has(questionId)) {
-    const entry = lookup.get(questionId);
-    entry.wrong_count = (entry.wrong_count || 0) + 1;
-    entry.last_attempt = new Date().toISOString();
+    const entry = { ...lookup.get(questionId) };
+    const attempts = Number.isFinite(entry.retry_attempts) ? entry.retry_attempts : 0;
+    const correctAttempts = Number.isFinite(entry.retry_correct) ? entry.retry_correct : 0;
+    entry.retry_attempts = attempts + 1;
+    entry.retry_correct = isCorrect ? correctAttempts + 1 : correctAttempts;
+    if (!isCorrect) {
+      entry.wrong_count = (entry.wrong_count || 0) + 1;
+    }
+    entry.last_attempt = timestamp;
     entry.last_answer = selectedIndices;
     lookup.set(questionId, entry);
-  } else {
+    saveWrongAnswers(Array.from(lookup.values()));
+    return;
+  }
+  if (!isCorrect) {
     lookup.set(questionId, {
       question_id: questionId,
       wrong_count: 1,
-      last_attempt: new Date().toISOString(),
+      last_attempt: timestamp,
       last_answer: selectedIndices,
+      retry_attempts: 0,
+      retry_correct: 0,
     });
+    saveWrongAnswers(Array.from(lookup.values()));
   }
-  saveWrongAnswers(Array.from(lookup.values()));
+}
+
+function formatRetryAccuracy(stats) {
+  if (!stats) {
+    return 'N/A';
+  }
+  const attempts = Number(stats.retry_attempts || 0);
+  const correct = Number(stats.retry_correct || 0);
+  if (!Number.isFinite(attempts) || attempts <= 0) {
+    return 'N/A';
+  }
+  const ratio = correct / attempts;
+  const percentage = Math.round(ratio * 100);
+  return `${percentage}% (${correct}/${attempts})`;
 }
 
 function parseCookies(cookieHeader) {
@@ -1666,12 +1685,14 @@ function renderIndex({ questionCount, wrongCount, domains, wrongDetails }) {
     const rows = wrongDetails
       .map((item) => {
         const question = item.question || {};
+        const accuracy = formatRetryAccuracy(item);
         return `\
           <tr>\
             <td>${escapeHtml(question.question || item.question_id)}</td>\
             <td>${escapeHtml(question.domain || 'Unknown')}</td>\
             <td>${escapeHtml(item.last_attempt || 'N/A')}</td>\
             <td>${escapeHtml(item.wrong_count || 0)}</td>\
+            <td>${escapeHtml(accuracy)}</td>\
           </tr>\
         `;
       })
@@ -1685,6 +1706,7 @@ function renderIndex({ questionCount, wrongCount, domains, wrongDetails }) {
               <th scope="col">Domain</th>\
               <th scope="col">Last Attempt</th>\
               <th scope="col">Times Missed</th>\
+              <th scope="col">Retry Accuracy</th>\
             </tr>\
           </thead>\
           <tbody>${rows}</tbody>\
@@ -2717,11 +2739,13 @@ function renderReview({ reviewQuestions, wrongLookup }) {
   const rows = reviewQuestions
     .map((question) => {
       const stats = wrongLookup[question.id] || {};
+      const accuracy = formatRetryAccuracy(stats);
       return `\
         <tr>\
           <td>${escapeHtml(question.question)}</td>\
           <td>${escapeHtml(question.domain)}</td>\
           <td>${escapeHtml(stats.wrong_count || 0)}</td>\
+          <td>${escapeHtml(accuracy)}</td>\
           <td>${escapeHtml(stats.last_attempt || 'N/A')}</td>\
         </tr>\
       `;
@@ -2753,6 +2777,7 @@ function renderReview({ reviewQuestions, wrongLookup }) {
                     <th scope="col">Question</th>
                     <th scope="col">Domain</th>
                     <th scope="col">Times Missed</th>
+                    <th scope="col">Retry Accuracy</th>
                     <th scope="col">Last Attempt (UTC)</th>
                   </tr>
                 </thead>
