@@ -2289,6 +2289,8 @@ function renderQuestionList({
 }
 
 function renderQuestionGroupView({ group }) {
+  const groupId = group && group.id ? String(group.id) : '';
+  const disabledAttr = groupId ? '' : ' disabled';
   const questionCards = Array.isArray(group.questions)
     ? group.questions
         .map((question, index) => {
@@ -2332,9 +2334,18 @@ function renderQuestionGroupView({ group }) {
         })
         .join('\n')
     : '<p class="text-muted">No questions found in this group.</p>';
-  const contextSection = group.context
-    ? `<p class="mb-3"><strong>Context:</strong> ${escapeHtml(group.context)}</p>`
-    : '<p class="text-muted">No shared context for this group.</p>';
+  const contextForm = `
+    <form method="post" action="/questions/update-group-context" class="mb-4">
+      <input type="hidden" name="id" value="${escapeHtml(groupId)}">
+      <div class="mb-3">
+        <label for="group_context" class="form-label">Shared context</label>
+        <textarea class="form-control" id="group_context" name="context" rows="4" placeholder="Enter context for this group"${disabledAttr}>${escapeHtml(group.context || '')}</textarea>
+        <div class="form-text">Shared stem or background information applied to all questions in this group.</div>
+      </div>
+      <button type="submit" class="btn btn-primary"${disabledAttr}>Save context</button>
+      ${groupId ? '' : '<p class="form-text text-danger mt-2">Cannot update context because this group is missing an identifier.</p>'}
+    </form>
+  `;
   return `
     <div class="row justify-content-center">
       <div class="col-lg-10">
@@ -2342,7 +2353,7 @@ function renderQuestionGroupView({ group }) {
           <div class="card-body">
             <h5 class="card-title">${escapeHtml(group.id || 'Question group')}</h5>
             <p class="mb-2"><strong>Domain:</strong> ${escapeHtml(group.domain || 'General')}</p>
-            ${contextSection}
+            ${contextForm}
             <p class="mb-4"><strong>Questions:</strong> ${escapeHtml(String((group.questions || []).length))}</p>
             ${questionCards}
             <a class="btn btn-secondary" href="/questions">Back to question bank</a>
@@ -2529,44 +2540,72 @@ function renderTest({ questions, mode }) {
   if (!questions.length) {
     return '<p class="text-muted">No questions available.</p>';
   }
-  const accordionItems = questions
-    .map((question, index) => {
-      const choiceItems = question.choices
-        .map(
-          (choice, choiceIndex) => `\
-            <div class="form-check">\
-              <input class="form-check-input" type="checkbox" value="${choiceIndex}" id="${escapeHtml(question.id)}-${choiceIndex}" name="q_${escapeHtml(question.id)}">\
-              <label class="form-check-label" for="${escapeHtml(question.id)}-${choiceIndex}">\
-                ${escapeHtml(choice)}\
-              </label>\
-            </div>\
-          `,
-        )
-        .join('\n');
-      return `\
-        <div class="accordion-item">\
-          <h2 class="accordion-header" id="heading-${index + 1}">\
-            <button class="accordion-button${index === 0 ? '' : ' collapsed'}" type="button" data-bs-toggle="collapse" data-bs-target="#collapse-${index + 1}" aria-expanded="${index === 0}" aria-controls="collapse-${index + 1}">\
-              <span class="badge bg-secondary me-2">${index + 1}</span>\
-              <span>${escapeHtml(question.question)}</span>\
-            </button>\
-          </h2>\
-          <div id="collapse-${index + 1}" class="accordion-collapse collapse${index === 0 ? ' show' : ''}" aria-labelledby="heading-${index + 1}" data-bs-parent="#testAccordion">\
-            <div class="accordion-body">\
-              <fieldset>\
-                <legend class="visually-hidden">Question ${index + 1}</legend>\
-                ${question.group_context
-                  ? `<p class="mb-3"><strong>Context:</strong> ${escapeHtml(question.group_context)}</p>`
-                  : ''}\
-                ${choiceItems}\
-                <div class="form-text">Domain: ${escapeHtml(question.domain)}</div>\
-              </fieldset>\
-            </div>\
-          </div>\
-        </div>\
-      `;
-    })
-    .join('\n');
+  const formatContext = (value) => escapeHtml(value).replace(/\r?\n/g, '<br>');
+  const groupMeta = new Map();
+  questions.forEach((question) => {
+    const key = question.group_id ? String(question.group_id) : `single-${question.id}`;
+    const existing = groupMeta.get(key) || { count: 0, context: '' };
+    existing.count += 1;
+    const rawContext = typeof question.group_context === 'string' ? question.group_context.trim() : '';
+    if (rawContext && !existing.context) {
+      existing.context = rawContext;
+    }
+    groupMeta.set(key, existing);
+  });
+  const sections = [];
+  let currentGroupKey = null;
+  let currentSectionParts = [];
+  let questionNumber = 0;
+  questions.forEach((question) => {
+    questionNumber += 1;
+    const groupKey = question.group_id ? String(question.group_id) : `single-${question.id}`;
+    if (groupKey !== currentGroupKey) {
+      if (currentSectionParts.length) {
+        sections.push(`<section class="mb-5">${currentSectionParts.join('\n')}</section>`);
+      }
+      currentSectionParts = [];
+      currentGroupKey = groupKey;
+      const meta = groupMeta.get(groupKey);
+      if (meta && meta.context) {
+        currentSectionParts.push(`
+          <div class="alert alert-secondary" role="note">
+            <p class="mb-2"><strong>背景描述：</strong>${formatContext(meta.context)}</p>
+            <p class="mb-0">根据此背景描述回答下面${escapeHtml(String(meta.count))}题。</p>
+          </div>
+        `);
+      }
+    }
+    const choiceItems = question.choices
+      .map((choice, choiceIndex) => {
+        const inputId = `${question.id}-${choiceIndex}`;
+        return `
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" value="${choiceIndex}" id="${escapeHtml(inputId)}" name="q_${escapeHtml(question.id)}">
+            <label class="form-check-label" for="${escapeHtml(inputId)}">
+              ${escapeHtml(choice)}
+            </label>
+          </div>
+        `;
+      })
+      .join('\n');
+    currentSectionParts.push(`
+      <div class="card mb-3">
+        <div class="card-body">
+          <fieldset>
+            <legend class="h6 card-title">${questionNumber}. ${escapeHtml(question.question)}</legend>
+            <div class="mb-3">
+              ${choiceItems}
+            </div>
+            <div class="form-text">Domain: ${escapeHtml(question.domain)}</div>
+          </fieldset>
+        </div>
+      </div>
+    `);
+  });
+  if (currentSectionParts.length) {
+    sections.push(`<section class="mb-5">${currentSectionParts.join('\n')}</section>`);
+  }
+  const sectionContent = sections.join('\n');
   return `
     <div class="row justify-content-center">
       <div class="col-lg-10">
@@ -2574,9 +2613,7 @@ function renderTest({ questions, mode }) {
           <div class="card-body">
             <h5 class="card-title">${mode === 'review' ? 'Review Session' : 'Practice Test'}</h5>
             <p class="card-text">Select the best answer(s) for each question. Questions may have multiple correct answers.</p>
-            <div class="accordion" id="testAccordion">
-              ${accordionItems}
-            </div>
+            ${sectionContent}
           </div>
           <div class="card-footer d-flex justify-content-between align-items-center">
             <span class="text-muted">Questions: ${questions.length}</span>
@@ -2977,6 +3014,32 @@ const server = http.createServer(async (req, res) => {
           body,
         }),
       );
+      return;
+    }
+
+    if (pathname === '/questions/update-group-context' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      const formData = new URLSearchParams(bodyBuffer.toString());
+      const id = (formData.get('id') || '').trim();
+      if (!id) {
+        addFlash(session, 'warning', 'Question group not found.');
+        redirect(res, '/questions');
+        return;
+      }
+      const contextInput = formData.get('context') || '';
+      const contextValue = contextInput.toString().replace(/\r\n/g, '\n').trim();
+      const targetGroup = Array.isArray(bank.groups)
+        ? bank.groups.find((group) => group && String(group.id) === id)
+        : null;
+      if (!targetGroup) {
+        addFlash(session, 'warning', 'Question group not found.');
+        redirect(res, '/questions');
+        return;
+      }
+      targetGroup.context = contextValue;
+      saveQuestionBank(bank);
+      addFlash(session, 'success', 'Group context updated successfully.');
+      redirect(res, `/questions/view-group?id=${encodeURIComponent(id)}`);
       return;
     }
 
