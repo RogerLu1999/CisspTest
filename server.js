@@ -1301,43 +1301,48 @@ function renderQuestionList({
       return `<option value="${escapeHtml(domain)}"${selected}>${escapeHtml(domain)}</option>`;
     })
     .join('\n');
+  const toSingleLine = (value) => value.replace(/\s+/g, ' ').trim();
+  const truncateText = (value, limit = 160) => {
+    if (value.length <= limit) {
+      return value;
+    }
+    return `${value.slice(0, limit).trimEnd()}...`;
+  };
   const rows = groups
-    .map((group) => {
+    .map((group, index) => {
       const groupId = group && group.id ? String(group.id) : '';
-      const groupLabel = groupId || 'Unnamed group';
-      const previewLimit = 3;
-      const previewQuestions = Array.isArray(group.previewQuestions)
-        ? group.previewQuestions.slice(0, previewLimit)
-        : [];
-      const previewItems = previewQuestions
-        .map((question) => `<li>${escapeHtml(question)}</li>`)
-        .join('\n');
-      const remaining = Math.max((group.questionCount || 0) - previewQuestions.length, 0);
-      const remainderItem =
-        remaining > 0
-          ? `<li class="text-muted fst-italic">… and ${escapeHtml(String(remaining))} more question${remaining === 1 ? '' : 's'}</li>`
-          : '';
-      const previewSection =
-        previewQuestions.length || remaining > 0
-          ? `<ul class="ps-3 mb-0 small">${previewItems}${remainderItem}</ul>`
-          : '<p class="small text-muted mb-0">No questions found in this group.</p>';
-      const contextSection = group.context
-        ? `<p class="mb-2 small">${escapeHtml(group.context)}</p>`
-        : '<p class="mb-2 small text-muted fst-italic">No shared context.</p>';
+      const questionCount = Number.isFinite(group && group.questionCount)
+        ? Number(group.questionCount)
+        : Array.isArray(group && group.questions)
+        ? group.questions.length
+        : 0;
+      const hasMultipleQuestions = questionCount > 1;
+      const previewQuestions = Array.isArray(group && group.previewQuestions) ? group.previewQuestions : [];
+      const firstQuestion = previewQuestions.length ? toSingleLine(String(previewQuestions[0])) : '';
+      const normalizedContext = group && group.context ? toSingleLine(String(group.context)) : '';
+      const questionSummary = hasMultipleQuestions
+        ? normalizedContext
+          ? `<p class="mb-0 small">${escapeHtml(truncateText(normalizedContext))}</p>`
+          : '<p class="mb-0 small text-muted fst-italic">No shared context.</p>'
+        : firstQuestion
+        ? `<p class="mb-0 small">${escapeHtml(firstQuestion)}</p>`
+        : '<p class="mb-0 small text-muted fst-italic">No question text available.</p>';
+      const headingPrefix = hasMultipleQuestions ? 'Question group' : 'Question';
+      const headingNumber = hasGroups ? start + index : index + 1;
+      const headingLabel = `${headingPrefix} ${headingNumber}`;
       return `
         <tr>
           <td class="text-center">
             <input class="form-check-input" type="checkbox" name="selected" value="${escapeHtml(groupId)}" form="exportForm" aria-label="Select group" data-select-item>
           </td>
           <td>
-            <div class="fw-semibold">${escapeHtml(groupLabel)}</div>
-            ${contextSection}
-            ${previewSection}
+            <div class="fw-semibold">${escapeHtml(headingLabel)}</div>
+            ${questionSummary}
           </td>
           <td>${escapeHtml(group.domain || 'General')}</td>
           <td class="text-center">${escapeHtml(String(group.questionCount || 0))}</td>
           <td class="text-nowrap">
-            <a class="btn btn-sm btn-outline-secondary" href="/questions/view-group?id=${encodeURIComponent(groupId)}">View group</a>
+            <a class="btn btn-sm btn-outline-secondary" href="/questions/view-group?id=${encodeURIComponent(groupId)}">View</a>
           </td>
         </tr>
       `;
