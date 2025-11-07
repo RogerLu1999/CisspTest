@@ -342,6 +342,78 @@ function flattenQuestionBank(bank) {
   return result;
 }
 
+function buildGroupSummaries(bank) {
+  const summaries = [];
+  if (!bank || !Array.isArray(bank.groups)) {
+    return summaries;
+  }
+  for (const group of bank.groups) {
+    if (!group || typeof group !== 'object' || !Array.isArray(group.questions) || !group.questions.length) {
+      continue;
+    }
+    const id = group.id ? String(group.id) : '';
+    const domain = (group.domain || 'General').toString().trim() || 'General';
+    const context = normalizeExplanation(group.context);
+    const questions = [];
+    const searchPieces = [context];
+    for (const rawQuestion of group.questions) {
+      if (!rawQuestion || typeof rawQuestion !== 'object') {
+        continue;
+      }
+      const questionText = (rawQuestion.question || rawQuestion.prompt || rawQuestion.text || '').toString().trim();
+      if (!questionText) {
+        continue;
+      }
+      const rawChoices = Array.isArray(rawQuestion.choices) ? rawQuestion.choices : [];
+      const choices = rawChoices.map((choice) => choice.toString());
+      if (choices.length < 2) {
+        continue;
+      }
+      const correctAnswers = Array.isArray(rawQuestion.correct_answers)
+        ? rawQuestion.correct_answers
+            .map((value) => Number.parseInt(value, 10))
+            .filter((value) => Number.isInteger(value) && value >= 0 && value < choices.length)
+        : normalizeCorrectAnswers(rawQuestion.correct_answers, choices);
+      if (!correctAnswers.length) {
+        continue;
+      }
+      const explanation = normalizeExplanation(rawQuestion.explanation || rawQuestion.comment);
+      const questionId = rawQuestion.id
+        ? String(rawQuestion.id)
+        : uuidv5(`${id || 'group'}::${questionText}`, DNS_NAMESPACE);
+      searchPieces.push(questionText);
+      if (explanation) {
+        searchPieces.push(explanation);
+      }
+      questions.push({
+        id: questionId,
+        question: questionText,
+        choices,
+        correct_answers: Array.from(new Set(correctAnswers)).sort((a, b) => a - b),
+        explanation,
+        comment: explanation,
+        domain,
+        group_id: id,
+        group_context: context,
+      });
+    }
+    if (!questions.length) {
+      continue;
+    }
+    summaries.push({
+      id,
+      domain,
+      context,
+      questionCount: questions.length,
+      questionIds: questions.map((question) => question.id),
+      previewQuestions: questions.map((question) => question.question),
+      questions,
+      searchText: searchPieces.join(' ').toLowerCase(),
+    });
+  }
+  return summaries;
+}
+
 function findQuestionLocation(bank, questionId) {
   if (!bank || !Array.isArray(bank.groups)) {
     return null;
@@ -371,31 +443,34 @@ function removeEmptyGroups(bank) {
 
 function loadQuestionContext() {
   const bank = loadQuestionBank();
+  const groups = buildGroupSummaries(bank);
   const questions = flattenQuestionBank(bank);
-  const domains = Array.from(new Set(questions.map((question) => question.domain || 'General'))).sort();
+  const domainSource = groups.length ? groups : questions;
+  const domains = Array.from(new Set(domainSource.map((item) => item.domain || 'General'))).sort();
   return {
     bank,
     questions,
+    groups,
     domains,
     questionCount: questions.length,
+    groupCount: groups.length,
   };
 }
 
-function buildExportPayload(bank, selectedIds) {
-  const includeAll = !selectedIds;
-  const idSet = includeAll ? null : new Set(selectedIds.map((value) => String(value)));
+function buildExportPayload(bank, selectedGroupIds) {
+  const includeAll = !selectedGroupIds;
+  const idSet = includeAll ? null : new Set(selectedGroupIds.map((value) => String(value)));
   const groups = [];
   if (bank && Array.isArray(bank.groups)) {
     for (const group of bank.groups) {
-      if (!group || !Array.isArray(group.questions)) {
+      if (!group || !Array.isArray(group.questions) || !group.questions.length) {
         continue;
       }
-      const filteredQuestions = group.questions
-        .filter((question) => includeAll || (question && idSet && idSet.has(String(question.id))));
-      if (!filteredQuestions.length) {
+      const groupId = group.id ? String(group.id) : '';
+      if (!includeAll && (!groupId || !idSet || !idSet.has(groupId))) {
         continue;
       }
-      const exportQuestions = filteredQuestions.map((question) => ({
+      const exportQuestions = group.questions.map((question) => ({
         id: question.id ? String(question.id) : undefined,
         question: (question.question || question.prompt || '').toString(),
         choices: Array.isArray(question.choices) ? question.choices.map((choice) => choice.toString()) : [],
@@ -411,7 +486,7 @@ function buildExportPayload(bank, selectedIds) {
         explanation: normalizeExplanation(question.explanation || question.comment),
       }));
       groups.push({
-        id: group.id ? String(group.id) : undefined,
+        id: groupId || undefined,
         domain: (group.domain || 'General').toString().trim() || 'General',
         context: normalizeExplanation(group.context),
         questions: exportQuestions,
@@ -438,6 +513,15 @@ function removeQuestionsById(bank, idsToRemove) {
   return removed;
 }
 
+function removeGroupsById(bank, idsToRemove) {
+  if (!bank || !Array.isArray(bank.groups) || !idsToRemove || !idsToRemove.size) {
+    return 0;
+  }
+  const before = bank.groups.length;
+  bank.groups = bank.groups.filter((group) => !idsToRemove.has(String(group.id)));
+  return before - bank.groups.length;
+}
+
 function filterQuestionsByParams(questions, domainFilter, searchFilter) {
   const domain = (domainFilter || '').trim();
   const search = (searchFilter || '').trim();
@@ -454,6 +538,42 @@ function filterQuestionsByParams(questions, domainFilter, searchFilter) {
     }
     return true;
   });
+}
+
+function filterGroupsByParams(groups, domainFilter, searchFilter) {
+  const domain = (domainFilter || '').trim();
+  const search = (searchFilter || '').trim().toLowerCase();
+  return groups.filter((group) => {
+    if (domain && group.domain !== domain) {
+      return false;
+    }
+    if (search && (!group.searchText || !group.searchText.includes(search))) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function collectGroupQuestionIds(groups, idSet) {
+  const questionIds = new Set();
+  if (!idSet || !idSet.size || !Array.isArray(groups)) {
+    return questionIds;
+  }
+  for (const group of groups) {
+    if (!group) {
+      continue;
+    }
+    const groupId = group.id !== undefined && group.id !== null ? String(group.id) : '';
+    if (!groupId || !idSet.has(groupId)) {
+      continue;
+    }
+    if (Array.isArray(group.questionIds)) {
+      for (const questionId of group.questionIds) {
+        questionIds.add(questionId);
+      }
+    }
+  }
+  return questionIds;
 }
 
 function buildQuestionRedirectUrl(pageParam, domainFilter, searchFilter) {
@@ -1161,17 +1281,17 @@ function renderImport() {
 }
 
 function renderQuestionList({
-  questions,
+  groups,
   page,
   totalPages,
   perPage,
-  totalQuestions,
+  totalGroups,
   filters,
   availableDomains,
 }) {
-  const hasQuestions = totalQuestions > 0;
-  const start = hasQuestions ? (page - 1) * perPage + 1 : 0;
-  const end = hasQuestions ? Math.min(start + perPage - 1, totalQuestions) : 0;
+  const hasGroups = totalGroups > 0;
+  const start = hasGroups ? (page - 1) * perPage + 1 : 0;
+  const end = hasGroups ? Math.min(start + perPage - 1, totalGroups) : 0;
   const filterDomain = filters.domain || '';
   const filterSearch = filters.search || '';
   const hasActiveFilters = Boolean(filterDomain || filterSearch);
@@ -1181,27 +1301,47 @@ function renderQuestionList({
       return `<option value="${escapeHtml(domain)}"${selected}>${escapeHtml(domain)}</option>`;
     })
     .join('\n');
-  const rows = questions
-    .map(
-      (question) => `
+  const rows = groups
+    .map((group) => {
+      const groupId = group && group.id ? String(group.id) : '';
+      const groupLabel = groupId || 'Unnamed group';
+      const previewLimit = 3;
+      const previewQuestions = Array.isArray(group.previewQuestions)
+        ? group.previewQuestions.slice(0, previewLimit)
+        : [];
+      const previewItems = previewQuestions
+        .map((question) => `<li>${escapeHtml(question)}</li>`)
+        .join('\n');
+      const remaining = Math.max((group.questionCount || 0) - previewQuestions.length, 0);
+      const remainderItem =
+        remaining > 0
+          ? `<li class="text-muted fst-italic">… and ${escapeHtml(String(remaining))} more question${remaining === 1 ? '' : 's'}</li>`
+          : '';
+      const previewSection =
+        previewQuestions.length || remaining > 0
+          ? `<ul class="ps-3 mb-0 small">${previewItems}${remainderItem}</ul>`
+          : '<p class="small text-muted mb-0">No questions found in this group.</p>';
+      const contextSection = group.context
+        ? `<p class="mb-2 small">${escapeHtml(group.context)}</p>`
+        : '<p class="mb-2 small text-muted fst-italic">No shared context.</p>';
+      return `
         <tr>
           <td class="text-center">
-            <input class="form-check-input" type="checkbox" name="selected" value="${escapeHtml(question.id)}" form="exportForm" aria-label="Select question" data-select-item>
+            <input class="form-check-input" type="checkbox" name="selected" value="${escapeHtml(groupId)}" form="exportForm" aria-label="Select group" data-select-item>
           </td>
-          <td>${escapeHtml(question.question)}</td>
-          <td>${escapeHtml(question.domain)}</td>
+          <td>
+            <div class="fw-semibold">${escapeHtml(groupLabel)}</div>
+            ${contextSection}
+            ${previewSection}
+          </td>
+          <td>${escapeHtml(group.domain || 'General')}</td>
+          <td class="text-center">${escapeHtml(String(group.questionCount || 0))}</td>
           <td class="text-nowrap">
-            <a class="btn btn-sm btn-outline-secondary" href="/questions/view?id=${encodeURIComponent(question.id)}">View</a>
-            <a class="btn btn-sm btn-outline-primary" href="/questions/edit?id=${encodeURIComponent(question.id)}">Edit</a>
-            <form class="d-inline" method="post" action="/questions/delete">
-              <input type="hidden" name="id" value="${escapeHtml(question.id)}">
-              <input type="hidden" name="page" value="${page}">
-              <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Delete this question?');">Delete</button>
-            </form>
+            <a class="btn btn-sm btn-outline-secondary" href="/questions/view-group?id=${encodeURIComponent(groupId)}">View group</a>
           </td>
         </tr>
-      `,
-    )
+      `;
+    })
     .join('\n');
   const paginationItems = Array.from({ length: totalPages }, (_, index) => index + 1)
     .map((number) => {
@@ -1221,13 +1361,14 @@ function renderQuestionList({
   const pagination =
     totalPages > 1
       ? `
-        <nav aria-label="Question pagination">
+        <nav aria-label="Question group pagination">
           <ul class="pagination justify-content-center">
             ${paginationItems}
           </ul>
         </nav>
       `
       : '';
+  const totalLabel = `group${totalGroups === 1 ? '' : 's'}`;
   return `
     <div class="row justify-content-center">
       <div class="col-lg-10">
@@ -1237,9 +1378,9 @@ function renderQuestionList({
             <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3 mb-3">
               <div>
                 <h5 class="card-title mb-1">Question Bank</h5>
-                <p class="card-text mb-0">${hasQuestions
-                  ? `Showing ${escapeHtml(String(start))}–${escapeHtml(String(end))} of ${escapeHtml(String(totalQuestions))} questions.`
-                  : 'No questions have been imported yet.'}</p>
+                <p class="card-text mb-0">${hasGroups
+                  ? `Showing ${escapeHtml(String(start))}–${escapeHtml(String(end))} of ${escapeHtml(String(totalGroups))} ${totalLabel}.`
+                  : 'No question groups have been imported yet.'}</p>
               </div>
               <div class="d-flex gap-2 flex-wrap">
                 <button type="submit" class="btn btn-outline-primary" form="exportForm" name="export_mode" value="selected">Export selected</button>
@@ -1257,14 +1398,14 @@ function renderQuestionList({
               </div>
               <div class="col-md-6">
                 <label for="search_filter" class="form-label">Search</label>
-                <input type="search" class="form-control" id="search_filter" name="q" value="${escapeHtml(filterSearch)}" placeholder="Search question text or explanation">
+                <input type="search" class="form-control" id="search_filter" name="q" value="${escapeHtml(filterSearch)}" placeholder="Search group context or question text">
               </div>
               <div class="col-md-2 d-flex gap-2">
                 <button type="submit" class="btn btn-primary flex-grow-1">Filter</button>
                 ${hasActiveFilters ? '<a class="btn btn-outline-secondary" href="/questions">Reset</a>' : ''}
               </div>
             </form>
-            <div class="d-flex flex-wrap align-items-center gap-3 mb-2" role="group" aria-label="Question selection controls">
+            <div class="d-flex flex-wrap align-items-center gap-3 mb-2" role="group" aria-label="Group selection controls">
               <div class="form-check form-check-inline mb-0">
                 <input type="checkbox" class="form-check-input" id="selection_scope_page" autocomplete="off" data-selection-control="page">
                 <label class="form-check-label" for="selection_scope_page">Select current page</label>
@@ -1275,24 +1416,25 @@ function renderQuestionList({
               </div>
             </div>
             <input type="hidden" name="selection_scope" value="page" form="exportForm" data-selection-scope-input>
-            <div class="table-responsive" data-selection-root data-total-questions="${escapeHtml(String(totalQuestions))}">
+            <div class="table-responsive" data-selection-root data-total-groups="${escapeHtml(String(totalGroups))}">
               <table class="table table-striped align-middle">
                 <thead>
                   <tr>
                     <th scope="col" class="text-center" style="width: 3.5rem;">Select</th>
-                    <th scope="col">Question</th>
+                    <th scope="col">Group details</th>
                     <th scope="col">Domain</th>
+                    <th scope="col" class="text-center">Questions</th>
                     <th scope="col" class="text-nowrap">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  ${rows || '<tr><td colspan="4" class="text-center text-muted">No questions imported yet.</td></tr>'}
+                  ${rows || '<tr><td colspan="5" class="text-center text-muted">No question groups imported yet.</td></tr>'}
                 </tbody>
               </table>
             </div>
             <input type="hidden" name="select_all_pages" value="0" form="exportForm" data-select-all-input>
             <div class="alert alert-info mt-3 d-none" role="status" data-selection-notice>
-              All ${escapeHtml(String(totalQuestions))} questions matching the current filters are selected.
+              All ${escapeHtml(String(totalGroups))} groups matching the current filters are selected.
             </div>
             <input type="hidden" name="page" value="${escapeHtml(String(page))}" form="exportForm">
             ${filterDomain ? `<input type="hidden" name="domain" value="${escapeHtml(filterDomain)}" form="exportForm">` : ''}
@@ -1311,8 +1453,8 @@ function renderQuestionList({
         const selectionScopeInput = document.querySelector('[data-selection-scope-input]');
         const selectionNotice = document.querySelector('[data-selection-notice]');
         const bulkDeleteButton = document.querySelector('[data-bulk-delete]');
-        const totalQuestions = selectionRoot
-          ? Number.parseInt(selectionRoot.getAttribute('data-total-questions') || '0', 10)
+        const totalGroups = selectionRoot
+          ? Number.parseInt(selectionRoot.getAttribute('data-total-groups') || '0', 10)
           : 0;
         const bulkDeleteLabelBase = bulkDeleteButton ? bulkDeleteButton.textContent.trim() || 'Delete selected' : 'Delete selected';
         const controlPage = selectionControls.find((control) => control.getAttribute('data-selection-control') === 'page');
@@ -1320,7 +1462,7 @@ function renderQuestionList({
         const isAllScopeActive = () => selectAllPagesInput && selectAllPagesInput.value === '1';
         const getSelectedCount = () => {
           if (isAllScopeActive()) {
-            return totalQuestions;
+            return totalGroups;
           }
           return itemCheckboxes.filter((checkbox) => checkbox.checked).length;
         };
@@ -1373,11 +1515,11 @@ function renderQuestionList({
           if (!selectionNotice) {
             return;
           }
-          if (isAllScopeActive() && totalQuestions > 0) {
+          if (isAllScopeActive() && totalGroups > 0) {
             selectionNotice.textContent =
-              totalQuestions === 1
-                ? 'All 1 question matching the current filters is selected.'
-                : 'All ' + totalQuestions + ' questions matching the current filters are selected.';
+              totalGroups === 1
+                ? 'All 1 group matching the current filters is selected.'
+                : 'All ' + totalGroups + ' groups matching the current filters are selected.';
             selectionNotice.classList.remove('d-none');
           } else {
             selectionNotice.classList.add('d-none');
@@ -1444,15 +1586,15 @@ function renderQuestionList({
             updateState();
           });
         });
-          itemCheckboxes.forEach((checkbox) => {
-            checkbox.addEventListener('change', () => {
-              if (selectAllPagesInput && selectAllPagesInput.value === '1' && !checkbox.checked) {
-                selectAllPagesInput.value = '0';
-                setScopeValue('page');
-              }
-              updateState();
-            });
+        itemCheckboxes.forEach((checkbox) => {
+          checkbox.addEventListener('change', () => {
+            if (selectAllPagesInput && selectAllPagesInput.value === '1' && !checkbox.checked) {
+              selectAllPagesInput.value = '0';
+              setScopeValue('page');
+            }
+            updateState();
           });
+        });
         const exportForm = document.getElementById('exportForm');
         if (exportForm) {
           exportForm.addEventListener('submit', (event) => {
@@ -1463,15 +1605,15 @@ function renderQuestionList({
             if (submitter && submitter.matches('[data-bulk-delete]')) {
               if (!usingAllScope && !hasPageSelection) {
                 event.preventDefault();
-                window.alert('Select at least one question to delete.');
+                window.alert('Select at least one group to delete.');
                 return;
               }
-              if (usingAllScope && totalQuestions === 0) {
+              if (usingAllScope && totalGroups === 0) {
                 event.preventDefault();
-                window.alert('No questions match the current filters to delete.');
+                window.alert('No groups match the current filters to delete.');
                 return;
               }
-              const countText = selectedCount === 1 ? '1 question' : selectedCount + ' questions';
+              const countText = selectedCount === 1 ? '1 group' : selectedCount + ' groups';
               const message = usingAllScope
                 ? 'Delete all ' + countText + ' that match the current filters? This action cannot be undone.'
                 : 'Delete the selected ' + countText + '? This action cannot be undone.';
@@ -1488,13 +1630,78 @@ function renderQuestionList({
               !hasPageSelection
             ) {
               event.preventDefault();
-              window.alert('Select at least one question before exporting.');
+              window.alert('Select at least one group before exporting.');
             }
           });
         }
         updateState();
       });
     </script>
+  `;
+}
+
+function renderQuestionGroupView({ group }) {
+  const questionCards = Array.isArray(group.questions)
+    ? group.questions
+        .map((question, index) => {
+          const choices = Array.isArray(question.choices)
+            ? question.choices
+                .map(
+                  (choice, choiceIndex) => `
+                    <li class="list-group-item">
+                      <strong>${String.fromCharCode(65 + choiceIndex)}.</strong> ${escapeHtml(choice)}
+                    </li>
+                  `,
+                )
+                .join('\n')
+            : '';
+          const correctAnswers = Array.isArray(question.correct_answers)
+            ? question.correct_answers
+                .map((answerIndex) => String.fromCharCode(65 + answerIndex))
+                .join(', ')
+            : '';
+          const explanation = question.explanation || question.comment || '';
+          return `
+            <div class="card mb-3">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start mb-2">
+                  <h6 class="card-title mb-0">Question ${index + 1}</h6>
+                  <span class="badge bg-secondary">${escapeHtml(question.id)}</span>
+                </div>
+                <p class="fw-semibold">${escapeHtml(question.question)}</p>
+                <ul class="list-group list-group-flush mb-3 small">
+                  ${choices}
+                </ul>
+                <p class="small mb-2"><strong>Correct:</strong> ${correctAnswers ? escapeHtml(correctAnswers) : 'N/A'}</p>
+                ${explanation ? `<p class="small mb-3"><strong>Explanation:</strong> ${escapeHtml(explanation)}</p>` : ''}
+                <div class="d-flex gap-2 flex-wrap">
+                  <a class="btn btn-sm btn-outline-secondary" href="/questions/view?id=${encodeURIComponent(question.id)}">View question</a>
+                  <a class="btn btn-sm btn-outline-primary" href="/questions/edit?id=${encodeURIComponent(question.id)}">Edit question</a>
+                </div>
+              </div>
+            </div>
+          `;
+        })
+        .join('\n')
+    : '<p class="text-muted">No questions found in this group.</p>';
+  const contextSection = group.context
+    ? `<p class="mb-3"><strong>Context:</strong> ${escapeHtml(group.context)}</p>`
+    : '<p class="text-muted">No shared context for this group.</p>';
+  return `
+    <div class="row justify-content-center">
+      <div class="col-lg-10">
+        <div class="card mb-3">
+          <div class="card-body">
+            <h5 class="card-title">${escapeHtml(group.id || 'Question group')}</h5>
+            <p class="mb-2"><strong>Domain:</strong> ${escapeHtml(group.domain || 'General')}</p>
+            ${contextSection}
+            <p class="mb-4"><strong>Questions:</strong> ${escapeHtml(String((group.questions || []).length))}</p>
+            ${questionCards}
+            <a class="btn btn-secondary" href="/questions">Back to question bank</a>
+          </div>
+        </div>
+      </div>
+    </div>
   `;
 }
 
@@ -1620,21 +1827,27 @@ function renderQuestionForm({ question, errors }) {
   `;
 }
 
-function renderNewTest({ questionCount, domains }) {
+function renderNewTest({ groupCount, domains }) {
   const options = domains.map((domain) => `<option value="${escapeHtml(domain)}">${escapeHtml(domain)}</option>`).join('\n');
-  const defaultQuestions = questionCount === 0 ? 0 : Math.min(questionCount, 25);
+  const hasGroups = groupCount > 0;
+  const defaultGroups = hasGroups ? Math.min(groupCount, 5) : 0;
+  const minGroups = hasGroups ? 1 : 0;
+  const maxGroups = hasGroups ? groupCount : 0;
+  const inputValue = hasGroups ? defaultGroups : 0;
+  const disabledAttr = hasGroups ? '' : ' disabled';
+  const requiredAttr = hasGroups ? ' required' : '';
   return `
     <div class="row justify-content-center">
       <div class="col-lg-6">
         <div class="card">
           <div class="card-body">
             <h5 class="card-title">Create a practice test</h5>
-            <p class="card-text">Select the number of questions and optionally filter by domain. A random set of questions will be pulled from your local bank.</p>
+            <p class="card-text">Select how many question groups to include and optionally filter by domain. Each group contributes all of its questions to the test.</p>
             <form method="post">
               <div class="mb-3">
-                <label for="total_questions" class="form-label">Number of questions</label>
-                <input type="number" class="form-control" id="total_questions" name="total_questions" min="1" max="${escapeHtml(questionCount)}" value="${escapeHtml(defaultQuestions)}" required>
-                <div class="form-text">Maximum available for the chosen domain.</div>
+                <label for="total_groups" class="form-label">Number of groups</label>
+                <input type="number" class="form-control" id="total_groups" name="total_groups" min="${escapeHtml(String(minGroups))}" max="${escapeHtml(String(maxGroups))}" value="${escapeHtml(String(inputValue))}"${disabledAttr}${requiredAttr}>
+                <div class="form-text">Maximum available groups for the chosen domain. All questions from each group are included.</div>
               </div>
               <div class="mb-3">
                 <label for="domain" class="form-label">Domain</label>
@@ -1643,7 +1856,7 @@ function renderNewTest({ questionCount, domains }) {
                   ${options}
                 </select>
               </div>
-              <button type="submit" class="btn btn-success"${questionCount === 0 ? ' disabled' : ''}>Start Test</button>
+              <button type="submit" class="btn btn-success"${hasGroups ? '' : ' disabled'}>Start Test</button>
             </form>
           </div>
         </div>
@@ -2001,26 +2214,26 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const { bank, questions, domains, questionCount } = loadQuestionContext();
+    const { bank, questions, groups, domains, questionCount, groupCount } = loadQuestionContext();
     const wrongAnswers = loadWrongAnswers();
 
     if (pathname === '/questions' && req.method === 'GET') {
       const perPage = 10;
       const domainFilter = (requestUrl.searchParams.get('domain') || '').trim();
       const searchFilter = (requestUrl.searchParams.get('q') || '').trim();
-      const filtered = filterQuestionsByParams(questions, domainFilter, searchFilter);
-      const totalQuestions = filtered.length;
-      const totalPages = Math.max(1, Math.ceil(Math.max(totalQuestions, 1) / perPage));
+      const filtered = filterGroupsByParams(groups, domainFilter, searchFilter);
+      const totalGroups = filtered.length;
+      const totalPages = Math.max(1, Math.ceil(Math.max(totalGroups, 1) / perPage));
       const requestedPage = Number.parseInt(requestUrl.searchParams.get('page') || '1', 10);
       const page = Number.isFinite(requestedPage) && requestedPage >= 1 ? Math.min(requestedPage, totalPages) : 1;
       const startIndex = (page - 1) * perPage;
       const pageItems = filtered.slice(startIndex, startIndex + perPage);
       const body = renderQuestionList({
-        questions: pageItems,
+        groups: pageItems,
         page,
         totalPages,
         perPage,
-        totalQuestions,
+        totalGroups,
         filters: { domain: domainFilter, search: searchFilter },
         availableDomains: domains,
       });
@@ -2051,29 +2264,29 @@ const server = http.createServer(async (req, res) => {
       const selectedIds = formData.getAll('selected').filter((value) => value);
       let exportIds = null;
       if (exportMode === 'selected') {
-        let selectedQuestions = [];
+        let selectedGroups = [];
         if (selectionScope === 'all' && selectAllPages) {
-          selectedQuestions = filterQuestionsByParams(questions, domainFilter, searchFilter);
-          if (!selectedQuestions.length) {
-            addFlash(session, 'warning', 'No questions match the current filters to export.');
+          selectedGroups = filterGroupsByParams(groups, domainFilter, searchFilter);
+          if (!selectedGroups.length) {
+            addFlash(session, 'warning', 'No question groups match the current filters to export.');
             redirect(res, redirectUrl);
             return;
           }
         } else {
           if (!selectedIds.length) {
-            addFlash(session, 'warning', 'Select at least one question to export or choose “Export all”.');
+            addFlash(session, 'warning', 'Select at least one question group to export or choose “Export all”.');
             redirect(res, redirectUrl);
             return;
           }
           const idSet = new Set(selectedIds);
-          selectedQuestions = questions.filter((question) => idSet.has(question.id));
-          if (!selectedQuestions.length) {
-            addFlash(session, 'warning', 'No matching questions were found for the selected items.');
+          selectedGroups = groups.filter((group) => idSet.has(group.id));
+          if (!selectedGroups.length) {
+            addFlash(session, 'warning', 'No matching question groups were found for the selected items.');
             redirect(res, redirectUrl);
             return;
           }
         }
-        exportIds = selectedQuestions.map((question) => question.id);
+        exportIds = selectedGroups.map((group) => group.id);
       }
       const exportPayload = buildExportPayload(bank, exportIds);
       const payload = JSON.stringify(exportPayload, null, 2);
@@ -2081,6 +2294,29 @@ const server = http.createServer(async (req, res) => {
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Content-Disposition', 'attachment; filename="questions_export.json"');
       res.end(payload);
+      return;
+    }
+
+    if (pathname === '/questions/view-group' && req.method === 'GET') {
+      const id = requestUrl.searchParams.get('id') || '';
+      const group = groups.find((item) => item.id === id);
+      if (!group) {
+        addFlash(session, 'warning', 'Question group not found.');
+        redirect(res, '/questions');
+        return;
+      }
+      const body = renderQuestionGroupView({ group });
+      sendHtml(
+        res,
+        renderLayout({
+          title: 'View Question Group · CISSP Test Simulator',
+          questionCount,
+          wrongCount: wrongAnswers.length,
+          domains,
+          flashMessages,
+          body,
+        }),
+      );
       return;
     }
 
@@ -2262,20 +2498,21 @@ const server = http.createServer(async (req, res) => {
       const selectAllPages = formData.get('select_all_pages') === '1';
       const redirectUrl = buildQuestionRedirectUrl(page, domainFilter, searchFilter);
       if (selectionScope === 'all' && selectAllPages) {
-        const filtered = filterQuestionsByParams(questions, domainFilter, searchFilter);
+        const filtered = filterGroupsByParams(groups, domainFilter, searchFilter);
         if (!filtered.length) {
-          addFlash(session, 'warning', 'No questions match the current filters to delete.');
+          addFlash(session, 'warning', 'No question groups match the current filters to delete.');
           redirect(res, redirectUrl);
           return;
         }
-        const filteredIds = new Set(filtered.map((question) => question.id));
-        const removedCount = removeQuestionsById(bank, filteredIds);
+        const filteredIds = new Set(filtered.map((group) => group.id));
+        const removedCount = removeGroupsById(bank, filteredIds);
         if (!removedCount) {
-          addFlash(session, 'warning', 'No questions match the current filters to delete.');
+          addFlash(session, 'warning', 'No question groups match the current filters to delete.');
           redirect(res, redirectUrl);
           return;
         }
-        const remainingWrongAnswers = wrongAnswers.filter((item) => !filteredIds.has(item.question_id));
+        const removedQuestionIds = collectGroupQuestionIds(filtered, filteredIds);
+        const remainingWrongAnswers = wrongAnswers.filter((item) => !removedQuestionIds.has(item.question_id));
         if (remainingWrongAnswers.length !== wrongAnswers.length) {
           saveWrongAnswers(remainingWrongAnswers);
         }
@@ -2283,24 +2520,25 @@ const server = http.createServer(async (req, res) => {
         addFlash(
           session,
           'success',
-          removedCount === 1 ? 'Deleted 1 question.' : `Deleted ${removedCount} questions.`,
+          removedCount === 1 ? 'Deleted 1 group.' : `Deleted ${removedCount} groups.`,
         );
         redirect(res, redirectUrl);
         return;
       }
       if (!selectedIds.length) {
-        addFlash(session, 'warning', 'Select at least one question to delete.');
+        addFlash(session, 'warning', 'Select at least one question group to delete.');
         redirect(res, redirectUrl);
         return;
       }
       const idSet = new Set(selectedIds);
-      const removedCount = removeQuestionsById(bank, idSet);
+      const removedCount = removeGroupsById(bank, idSet);
       if (removedCount === 0) {
-        addFlash(session, 'warning', 'No matching questions were found for the selected items.');
+        addFlash(session, 'warning', 'No matching question groups were found for the selected items.');
         redirect(res, redirectUrl);
         return;
       }
-      const remainingWrongAnswers = wrongAnswers.filter((item) => !idSet.has(item.question_id));
+      const removedQuestionIds = collectGroupQuestionIds(groups, idSet);
+      const remainingWrongAnswers = wrongAnswers.filter((item) => !removedQuestionIds.has(item.question_id));
       if (remainingWrongAnswers.length !== wrongAnswers.length) {
         saveWrongAnswers(remainingWrongAnswers);
       }
@@ -2308,7 +2546,7 @@ const server = http.createServer(async (req, res) => {
       addFlash(
         session,
         'success',
-        removedCount === 1 ? 'Deleted 1 question.' : `Deleted ${removedCount} questions.`,
+        removedCount === 1 ? 'Deleted 1 group.' : `Deleted ${removedCount} groups.`,
       );
       redirect(res, redirectUrl);
       return;
@@ -2420,7 +2658,7 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/test/new') {
       if (req.method === 'GET') {
-        const body = renderNewTest({ questionCount, domains });
+        const body = renderNewTest({ groupCount, domains });
         sendHtml(
           res,
           renderLayout({
@@ -2435,7 +2673,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST') {
-        if (questionCount === 0) {
+        if (groupCount === 0) {
           addFlash(session, 'warning', 'Import questions before creating a test.');
           redirect(res, '/import');
           return;
@@ -2443,19 +2681,36 @@ const server = http.createServer(async (req, res) => {
         const bodyBuffer = await collectRequestBody(req);
         const formData = new URLSearchParams(bodyBuffer.toString());
         const domain = formData.get('domain') || '';
-        const filtered = questions.filter((q) => !domain || q.domain === domain);
-        if (!filtered.length) {
-          addFlash(session, 'warning', 'No questions available for the selected criteria.');
+        const filteredGroups = groups.filter((group) => !domain || group.domain === domain);
+        if (!filteredGroups.length) {
+          addFlash(session, 'warning', 'No question groups available for the selected criteria.');
           redirect(res, '/test/new');
           return;
         }
-        const requested = Number.parseInt(formData.get('total_questions') || '0', 10);
-        const totalQuestions = Math.max(1, Math.min(Number.isFinite(requested) ? requested : filtered.length, filtered.length));
-        const selected = takeRandomSample(filtered, totalQuestions).map((question) => ({
-          ...question,
-        }));
+        const requested = Number.parseInt(formData.get('total_groups') || '0', 10);
+        const totalGroups = Math.max(
+          1,
+          Math.min(Number.isFinite(requested) ? requested : filteredGroups.length, filteredGroups.length),
+        );
+        const selectedGroups = takeRandomSample(filteredGroups, totalGroups);
+        const selectedQuestions = [];
+        for (const group of selectedGroups) {
+          if (!group || !Array.isArray(group.questions)) {
+            continue;
+          }
+          for (const question of group.questions) {
+            selectedQuestions.push({
+              ...question,
+            });
+          }
+        }
+        if (!selectedQuestions.length) {
+          addFlash(session, 'warning', 'The selected groups did not contain any questions.');
+          redirect(res, '/test/new');
+          return;
+        }
         session.currentTest = {
-          questions: selected,
+          questions: selectedQuestions,
           timestamp: new Date().toISOString(),
           mode: 'standard',
         };
