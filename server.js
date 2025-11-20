@@ -1960,11 +1960,36 @@ function renderLearningHub({ knowledgeBase }) {
               <td>${escapeHtml(doc.filename || 'N/A')}</td>
               <td>${escapeHtml(uploaded)}</td>
               <td>${chunkCount}</td>
+              <td>
+                <div class="d-flex flex-column gap-2">
+                  <form class="d-flex gap-2 flex-wrap" method="POST" action="/learning/document/rename">
+                    <input type="hidden" name="doc_id" value="${escapeHtml(doc.id || '')}" />
+                    <input
+                      type="text"
+                      class="form-control form-control-sm"
+                      name="new_title"
+                      value="${escapeHtml(doc.title || doc.filename || 'Untitled')}"
+                      placeholder="New title"
+                    />
+                    <button type="submit" class="btn btn-sm btn-outline-primary">Rename</button>
+                  </form>
+                  <div class="d-flex gap-2 flex-wrap">
+                    <form method="POST" action="/learning/document/regenerate" onsubmit="return confirm('Regenerate knowledge snippets for this document?');">
+                      <input type="hidden" name="doc_id" value="${escapeHtml(doc.id || '')}" />
+                      <button type="submit" class="btn btn-sm btn-outline-secondary">Regenerate RAG</button>
+                    </form>
+                    <form method="POST" action="/learning/document/delete" onsubmit="return confirm('Remove this document from the knowledge base?');">
+                      <input type="hidden" name="doc_id" value="${escapeHtml(doc.id || '')}" />
+                      <button type="submit" class="btn btn-sm btn-outline-danger">Remove</button>
+                    </form>
+                  </div>
+                </div>
+              </td>
             </tr>
           `;
         })
         .join('\n')
-    : '<tr><td colspan="4" class="text-muted">No documents uploaded yet.</td></tr>';
+    : '<tr><td colspan="5" class="text-muted">No documents uploaded yet.</td></tr>';
 
   return `
     <div class="row g-4">
@@ -1999,6 +2024,7 @@ function renderLearningHub({ knowledgeBase }) {
                     <th>Filename</th>
                     <th>Uploaded</th>
                     <th>Chunks</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -3727,10 +3753,81 @@ const server = http.createServer(async (req, res) => {
         title: title.trim() || upload.filename,
         filename: upload.filename,
         uploaded_at: new Date().toISOString(),
+        raw_text: text,
         chunks,
       });
       saveKnowledgeBase(knowledgeBase);
       addFlash(session, 'success', `Uploaded ${upload.filename} with ${chunks.length} knowledge snippets.`);
+      redirect(res, '/learning');
+      return;
+    }
+
+    if (pathname === '/learning/document/rename' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      const formData = new URLSearchParams(bodyBuffer.toString());
+      const docId = formData.get('doc_id') || '';
+      const newTitle = (formData.get('new_title') || '').trim();
+      const doc = knowledgeBase.documents.find((item) => item.id === docId);
+      if (!doc) {
+        addFlash(session, 'danger', 'Document not found.');
+        redirect(res, '/learning');
+        return;
+      }
+      if (!newTitle) {
+        addFlash(session, 'danger', 'Enter a new title to rename the document.');
+        redirect(res, '/learning');
+        return;
+      }
+      doc.title = newTitle;
+      saveKnowledgeBase(knowledgeBase);
+      addFlash(session, 'success', `Renamed document to ${newTitle}.`);
+      redirect(res, '/learning');
+      return;
+    }
+
+    if (pathname === '/learning/document/delete' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      const formData = new URLSearchParams(bodyBuffer.toString());
+      const docId = formData.get('doc_id') || '';
+      const index = knowledgeBase.documents.findIndex((item) => item.id === docId);
+      if (index === -1) {
+        addFlash(session, 'danger', 'Document not found.');
+        redirect(res, '/learning');
+        return;
+      }
+      knowledgeBase.documents.splice(index, 1);
+      saveKnowledgeBase(knowledgeBase);
+      addFlash(session, 'success', 'Removed document from the knowledge base.');
+      redirect(res, '/learning');
+      return;
+    }
+
+    if (pathname === '/learning/document/regenerate' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      const formData = new URLSearchParams(bodyBuffer.toString());
+      const docId = formData.get('doc_id') || '';
+      const doc = knowledgeBase.documents.find((item) => item.id === docId);
+      if (!doc) {
+        addFlash(session, 'danger', 'Document not found.');
+        redirect(res, '/learning');
+        return;
+      }
+      const sourceText = ((doc.raw_text || '').trim())
+        || (Array.isArray(doc.chunks) ? doc.chunks.map((chunk) => (chunk.text || '')).join('\n\n') : '');
+      if (!sourceText.trim()) {
+        addFlash(session, 'danger', 'No source text available to regenerate knowledge snippets.');
+        redirect(res, '/learning');
+        return;
+      }
+      const regeneratedChunks = chunkText(sourceText, 850).map((value) => ({ id: crypto.randomUUID(), text: value }));
+      if (!regeneratedChunks.length) {
+        addFlash(session, 'danger', 'Regeneration failed because no readable text was found.');
+        redirect(res, '/learning');
+        return;
+      }
+      doc.chunks = regeneratedChunks;
+      saveKnowledgeBase(knowledgeBase);
+      addFlash(session, 'success', `Regenerated ${regeneratedChunks.length} knowledge snippets.`);
       redirect(res, '/learning');
       return;
     }
