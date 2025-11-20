@@ -2041,28 +2041,27 @@ function renderLearningHub({ knowledgeBase, selectedChatId }) {
               <td>${escapeHtml(uploaded)}</td>
               <td>${chunkCount}</td>
               <td>
-                <div class="d-flex flex-column gap-2">
-                  <form class="d-flex gap-2 flex-wrap" method="POST" action="/learning/document/rename">
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-primary rename-trigger"
+                    data-doc-id="${escapeHtml(doc.id || '')}"
+                    data-current-title="${escapeHtml(doc.title || doc.filename || 'Untitled')}"
+                  >
+                    Rename
+                  </button>
+                  <form class="d-inline m-0" method="POST" action="/learning/document/regenerate" onsubmit="return confirm('Regenerate knowledge snippets for this document?');">
                     <input type="hidden" name="doc_id" value="${escapeHtml(doc.id || '')}" />
-                    <input
-                      type="text"
-                      class="form-control form-control-sm"
-                      name="new_title"
-                      value="${escapeHtml(doc.title || doc.filename || 'Untitled')}"
-                      placeholder="New title"
-                    />
-                    <button type="submit" class="btn btn-sm btn-outline-primary">Rename</button>
+                    <button type="submit" class="btn btn-sm btn-outline-secondary">Regen</button>
                   </form>
-                  <div class="d-flex gap-2 flex-wrap">
-                    <form method="POST" action="/learning/document/regenerate" onsubmit="return confirm('Regenerate knowledge snippets for this document?');">
-                      <input type="hidden" name="doc_id" value="${escapeHtml(doc.id || '')}" />
-                      <button type="submit" class="btn btn-sm btn-outline-secondary">Regenerate RAG</button>
-                    </form>
-                    <form method="POST" action="/learning/document/delete" onsubmit="return confirm('Remove this document from the knowledge base?');">
-                      <input type="hidden" name="doc_id" value="${escapeHtml(doc.id || '')}" />
-                      <button type="submit" class="btn btn-sm btn-outline-danger">Remove</button>
-                    </form>
-                  </div>
+                  <form class="d-inline m-0" method="POST" action="/learning/document/delete" onsubmit="return confirm('Remove this document from the knowledge base?');">
+                    <input type="hidden" name="doc_id" value="${escapeHtml(doc.id || '')}" />
+                    <button type="submit" class="btn btn-sm btn-outline-danger">Remove</button>
+                  </form>
+                  <form class="d-none rename-form" data-doc-id="${escapeHtml(doc.id || '')}" method="POST" action="/learning/document/rename">
+                    <input type="hidden" name="doc_id" value="${escapeHtml(doc.id || '')}" />
+                    <input type="hidden" name="new_title" value="${escapeHtml(doc.title || doc.filename || 'Untitled')}" />
+                  </form>
                 </div>
               </td>
             </tr>
@@ -2198,6 +2197,7 @@ function renderLearningHub({ knowledgeBase, selectedChatId }) {
       const chatHeaderTitle = document.getElementById('chat-header-title');
       const chatIdInput = document.getElementById('chat-id');
       const newChatButton = document.getElementById('new-chat-btn');
+      const renameButtons = document.querySelectorAll('.rename-trigger');
 
       function findChat(id) {
         return chats.find((chat) => chat.id === id);
@@ -2376,6 +2376,26 @@ function renderLearningHub({ knowledgeBase, selectedChatId }) {
         } finally {
           chatSpinner?.classList.add('d-none');
         }
+      });
+
+      renameButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+          const docId = button.getAttribute('data-doc-id');
+          const currentTitle = button.getAttribute('data-current-title') || '';
+          const newTitle = prompt('Enter a new title for this document:', currentTitle);
+          if (!newTitle || !newTitle.trim()) {
+            return;
+          }
+          const renameForm = document.querySelector('form.rename-form[data-doc-id="' + docId + '"]');
+          if (!renameForm) {
+            return;
+          }
+          const titleInput = renameForm.querySelector('input[name="new_title"]');
+          if (titleInput) {
+            titleInput.value = newTitle.trim();
+          }
+          renameForm.submit();
+        });
       });
     </script>
   `;
