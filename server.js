@@ -1614,16 +1614,43 @@ function saveWrongAnswers(data) {
   writeJson(WRONG_FILE, data);
 }
 
+function normalizeChatMessage(raw) {
+  const base = raw && typeof raw === 'object' ? raw : {};
+  const role = base.role === 'assistant' ? 'assistant' : 'user';
+  const citations = Array.isArray(base.citations) ? base.citations.map((item) => String(item)) : [];
+  return {
+    id: base.id || crypto.randomUUID(),
+    role,
+    content: (base.content || '').toString(),
+    citations,
+    created_at: base.created_at || new Date().toISOString(),
+  };
+}
+
+function normalizeChat(raw) {
+  const base = raw && typeof raw === 'object' ? raw : {};
+  const messages = Array.isArray(base.messages) ? base.messages.map((item) => normalizeChatMessage(item)) : [];
+  const title = (base.title || '').toString().trim() || 'New chat';
+  return {
+    id: base.id || crypto.randomUUID(),
+    title,
+    created_at: base.created_at || new Date().toISOString(),
+    messages,
+  };
+}
+
 function loadKnowledgeBase() {
   const data = readJson(KNOWLEDGE_FILE);
-  if (data && typeof data === 'object' && Array.isArray(data.documents)) {
-    return { documents: data.documents };
-  }
-  return { documents: [] };
+  const documents = Array.isArray(data?.documents) ? data.documents : [];
+  const chats = Array.isArray(data?.chats) ? data.chats.map((chat) => normalizeChat(chat)) : [];
+  return { documents, chats };
 }
 
 function saveKnowledgeBase(data) {
-  writeJson(KNOWLEDGE_FILE, { documents: Array.isArray(data.documents) ? data.documents : [] });
+  writeJson(KNOWLEDGE_FILE, {
+    documents: Array.isArray(data.documents) ? data.documents : [],
+    chats: Array.isArray(data.chats) ? data.chats.map((chat) => normalizeChat(chat)) : [],
+  });
 }
 
 function chunkText(content, maxLength = 900) {
@@ -1649,6 +1676,29 @@ function chunkText(content, maxLength = 900) {
     chunks.push(normalized.trim().slice(0, maxLength));
   }
   return chunks;
+}
+
+function ensureDefaultChat(knowledgeBase) {
+  if (!Array.isArray(knowledgeBase.chats)) {
+    knowledgeBase.chats = [];
+  }
+  if (!knowledgeBase.chats.length) {
+    knowledgeBase.chats.push({
+      id: crypto.randomUUID(),
+      title: 'New chat',
+      created_at: new Date().toISOString(),
+      messages: [],
+    });
+    return true;
+  }
+  return false;
+}
+
+function findChatById(knowledgeBase, chatId) {
+  if (!Array.isArray(knowledgeBase.chats)) {
+    return undefined;
+  }
+  return knowledgeBase.chats.find((chat) => chat.id === chatId);
 }
 
 function tokenize(text) {
@@ -1805,6 +1855,21 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function encodeJsonForHtml(value) {
+  return JSON.stringify(value).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 function renderLayout({ title, questionCount, wrongCount, domains, flashMessages, body }) {
   const alerts = (flashMessages || [])
     .map(
@@ -1947,12 +2012,27 @@ function renderIndex({ questionCount, wrongCount, domains, wrongDetails }) {
   `;
 }
 
-function renderLearningHub({ knowledgeBase }) {
+function renderChatMessage(message) {
+  const role = message.role === 'assistant' ? 'assistant' : 'user';
+  const author = role === 'assistant' ? 'Qwen' : 'You';
+  const citations = Array.isArray(message.citations) && message.citations.length
+    ? `<div class="small text-warning mt-1">Citations: ${message.citations.map((item) => escapeHtml(item)).join(', ')}</div>`
+    : '';
+  return `
+    <div class="chat-message chat-${escapeHtml(role)} mb-3">
+      <div class="fw-bold">${escapeHtml(author)}</div>
+      <div class="chat-bubble">${escapeHtml(message.content || '')}</div>
+      ${citations}
+    </div>
+  `;
+}
+
+function renderLearningHub({ knowledgeBase, selectedChatId }) {
   const documents = Array.isArray(knowledgeBase.documents) ? knowledgeBase.documents : [];
   const documentList = documents.length
     ? documents
         .map((doc) => {
-          const uploaded = doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleString() : 'Unknown';
+          const uploaded = formatDateTime(doc.uploaded_at) || 'Unknown';
           const chunkCount = Array.isArray(doc.chunks) ? doc.chunks.length : 0;
           return `
             <tr>
@@ -1990,6 +2070,37 @@ function renderLearningHub({ knowledgeBase }) {
         })
         .join('\n')
     : '<tr><td colspan="5" class="text-muted">No documents uploaded yet.</td></tr>';
+
+  const chats = Array.isArray(knowledgeBase.chats) ? knowledgeBase.chats : [];
+  const selectedChat = selectedChatId ? findChatById(knowledgeBase, selectedChatId) : chats[0] || null;
+  const chatMessages = Array.isArray(selectedChat?.messages) ? selectedChat.messages : [];
+  const chatMessagesHtml = chatMessages.length
+    ? chatMessages.map((message) => renderChatMessage(message)).join('\n')
+    : '<div class="text-muted">Ask a question to begin.</div>';
+  const chatListItems = chats.length
+    ? chats
+        .map((chat) => {
+          const created = formatDateTime(chat.created_at) || 'Recently';
+          const messageCount = Array.isArray(chat.messages) ? chat.messages.length : 0;
+          const activeClass = selectedChat && selectedChat.id === chat.id ? ' active' : '';
+          return `
+            <button
+              class="list-group-item list-group-item-action d-flex justify-content-between align-items-start chat-list-item${activeClass}"
+              type="button"
+              data-chat-id="${escapeHtml(chat.id || '')}"
+            >
+              <div class="me-2">
+                <div class="fw-bold text-truncate">${escapeHtml(chat.title || 'New chat')}</div>
+                <div class="small text-muted">${escapeHtml(created)}</div>
+              </div>
+              <span class="badge text-bg-secondary rounded-pill">${escapeHtml(messageCount)}</span>
+            </button>
+          `;
+        })
+        .join('\n')
+    : '<div class="list-group-item text-muted">No chats yet. Start a new conversation.</div>';
+  const chatData = encodeJsonForHtml({ chats, selectedChatId: selectedChat ? selectedChat.id : null });
+  const selectedChatTitle = selectedChat ? selectedChat.title || 'New chat' : 'New chat';
 
   return `
     <div class="row g-4">
@@ -2038,41 +2149,73 @@ function renderLearningHub({ knowledgeBase }) {
           <div class="card-body">
             <div class="d-flex align-items-center justify-content-between mb-3">
               <div>
-                <h5 class="card-title mb-0">Learning Hub chat</h5>
+                <h5 class="card-title mb-0" id="chat-header-title">${escapeHtml(selectedChatTitle)}</h5>
                 <p class="text-muted mb-0">Ask questions answered by your uploaded knowledge, powered by Qwen.</p>
               </div>
               <div class="spinner-border text-primary d-none" role="status" id="chat-spinner">
                 <span class="visually-hidden">Loading...</span>
               </div>
             </div>
-            <div id="chat-log" class="border rounded p-3 mb-3 chat-log" style="height: 320px; overflow-y: auto; background: #0b1e36; color: #e3e8ef;">
-              <div class="text-muted">Ask a question to begin.</div>
-            </div>
-            <form id="chat-form">
-              <div class="mb-3">
-                <label for="chat-question" class="form-label">Your question</label>
-                <textarea class="form-control" id="chat-question" name="question" rows="3" placeholder="How do I design a secure change management process?" required></textarea>
+            <div class="row g-3">
+              <div class="col-lg-4">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                  <h6 class="mb-0">Chat history</h6>
+                  <button class="btn btn-sm btn-outline-primary" type="button" id="new-chat-btn">New chat</button>
+                </div>
+                <div class="list-group chat-list" id="chat-list" aria-label="Chat history">
+                  ${chatListItems}
+                </div>
               </div>
-              <button type="submit" class="btn btn-success">Ask Qwen</button>
-              <div class="form-text">Responses include citations pointing to the documents you uploaded.</div>
-            </form>
+              <div class="col-lg-8">
+                <div id="chat-log" class="border rounded p-3 mb-3 chat-log">
+                  ${chatMessagesHtml}
+                </div>
+                <form id="chat-form">
+                  <input type="hidden" id="chat-id" name="chat_id" value="${escapeHtml(selectedChat ? selectedChat.id : '')}" />
+                  <div class="mb-3">
+                    <label for="chat-question" class="form-label">Your question</label>
+                    <textarea class="form-control" id="chat-question" name="question" rows="3" placeholder="How do I design a secure change management process?" required></textarea>
+                  </div>
+                  <button type="submit" class="btn btn-success">Ask Qwen</button>
+                  <div class="form-text">Responses include citations pointing to the documents you uploaded.</div>
+                </form>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
+    <script id="chat-data" type="application/json">${chatData}</script>
     <script>
+      const chatDataElement = document.getElementById('chat-data');
+      const chatState = chatDataElement ? JSON.parse(chatDataElement.textContent || '{}') : { chats: [], selectedChatId: null };
+      let chats = Array.isArray(chatState.chats) ? chatState.chats : [];
+      let selectedChatId = chatState.selectedChatId || (chats[0]?.id ?? null);
       const chatForm = document.getElementById('chat-form');
       const chatLog = document.getElementById('chat-log');
       const chatSpinner = document.getElementById('chat-spinner');
-      function appendMessage(author, text, citations = []) {
+      const chatList = document.getElementById('chat-list');
+      const chatHeaderTitle = document.getElementById('chat-header-title');
+      const chatIdInput = document.getElementById('chat-id');
+      const newChatButton = document.getElementById('new-chat-btn');
+
+      function findChat(id) {
+        return chats.find((chat) => chat.id === id);
+      }
+
+      function appendMessageElement(author, text, citations = [], role = 'user') {
+        if (!chatLog) {
+          return;
+        }
         const wrapper = document.createElement('div');
-        wrapper.className = 'mb-3';
+        wrapper.className = 'chat-message chat-' + role + ' mb-3';
         const title = document.createElement('div');
         title.className = 'fw-bold';
         title.textContent = author;
         wrapper.appendChild(title);
         const body = document.createElement('div');
-        body.innerText = text;
+        body.className = 'chat-bubble';
+        body.textContent = text;
         wrapper.appendChild(body);
         if (citations.length) {
           const citeList = document.createElement('div');
@@ -2083,33 +2226,155 @@ function renderLearningHub({ knowledgeBase }) {
         chatLog.appendChild(wrapper);
         chatLog.scrollTop = chatLog.scrollHeight;
       }
+
+      function renderChatList() {
+        if (!chatList) {
+          return;
+        }
+        if (!chats.length) {
+          chatList.innerHTML = '<div class="list-group-item text-muted">No chats yet. Start a new conversation.</div>';
+          return;
+        }
+        chatList.innerHTML = chats
+          .map((chat) => {
+            const created = chat.created_at ? new Date(chat.created_at).toLocaleString() : 'Recently';
+            const messageCount = Array.isArray(chat.messages) ? chat.messages.length : 0;
+            const activeClass = chat.id === selectedChatId ? ' active' : '';
+            return (
+              '<button class="list-group-item list-group-item-action d-flex justify-content-between align-items-start chat-list-item' +
+              activeClass +
+              '" type="button" data-chat-id="' +
+              chat.id +
+              '">' +
+              '<div class="me-2">' +
+              '<div class="fw-bold text-truncate">' +
+              (chat.title || 'New chat') +
+              '</div>' +
+              '<div class="small text-muted">' +
+              created +
+              '</div>' +
+              '</div>' +
+              '<span class="badge text-bg-secondary rounded-pill">' +
+              messageCount +
+              '</span>' +
+              '</button>'
+            );
+          })
+          .join('');
+      }
+
+      function renderMessages(chat) {
+        if (!chatLog) {
+          return;
+        }
+        chatLog.innerHTML = '';
+        if (!chat || !Array.isArray(chat.messages) || !chat.messages.length) {
+          chatLog.innerHTML = '<div class="text-muted">Ask a question to begin.</div>';
+          return;
+        }
+        chat.messages.forEach((message) => {
+          const author = message.role === 'assistant' ? 'Qwen' : 'You';
+          appendMessageElement(author, message.content || '', message.citations || [], message.role || 'user');
+        });
+      }
+
+      function updateSelectedChat(chatId, updateUrl = false) {
+        selectedChatId = chatId;
+        if (chatIdInput) {
+          chatIdInput.value = chatId || '';
+        }
+        const selectedChat = findChat(chatId);
+        if (chatHeaderTitle) {
+          chatHeaderTitle.textContent = selectedChat?.title || 'New chat';
+        }
+        renderChatList();
+        renderMessages(selectedChat);
+        if (updateUrl && chatId) {
+          const url = new URL(window.location.href);
+          url.searchParams.set('chat', chatId);
+          window.history.replaceState({}, '', url.toString());
+        }
+      }
+
+      renderChatList();
+      updateSelectedChat(selectedChatId, false);
+
+      chatList?.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-chat-id]');
+        if (!button) {
+          return;
+        }
+        const chatId = button.getAttribute('data-chat-id');
+        updateSelectedChat(chatId, true);
+      });
+
+      newChatButton?.addEventListener('click', async () => {
+        chatSpinner?.classList.remove('d-none');
+        try {
+          const response = await fetch('/learning/chat/new', { method: 'POST' });
+          if (!response.ok) {
+            const errorText = await response.text();
+            appendMessageElement('System', 'Unable to create a new chat: ' + errorText, [], 'system');
+            return;
+          }
+          const data = await response.json();
+          const newChat = {
+            id: data.chat_id,
+            title: data.title || 'New chat',
+            created_at: data.created_at || new Date().toISOString(),
+            messages: [],
+          };
+          chats = [newChat, ...chats];
+          updateSelectedChat(newChat.id, true);
+        } catch (error) {
+          appendMessageElement('System', 'Unable to create a new chat: ' + error.message, [], 'system');
+        } finally {
+          chatSpinner?.classList.add('d-none');
+        }
+      });
+
       chatForm?.addEventListener('submit', async (event) => {
         event.preventDefault();
         const questionInput = document.getElementById('chat-question');
-        const question = questionInput.value.trim();
+        const question = questionInput?.value.trim();
         if (!question) {
           return;
         }
-        appendMessage('You', question);
+        const selectedChat = findChat(selectedChatId);
+        if (!selectedChat) {
+          appendMessageElement('System', 'Create a new chat before asking a question.', [], 'system');
+          return;
+        }
         questionInput.value = '';
-        chatSpinner.classList.remove('d-none');
+        selectedChat.messages = Array.isArray(selectedChat.messages) ? selectedChat.messages : [];
+        selectedChat.messages.push({ role: 'user', content: question, citations: [] });
+        renderMessages(selectedChat);
+        chatSpinner?.classList.remove('d-none');
         try {
           const response = await fetch('/learning/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question }),
+            body: JSON.stringify({ question, chat_id: selectedChat.id }),
           });
           if (!response.ok) {
             const errorText = await response.text();
-            appendMessage('System', 'Request failed: ' + errorText);
-          } else {
-            const data = await response.json();
-            appendMessage('Qwen', data.answer || 'No answer returned.', data.citations || []);
+            appendMessageElement('System', 'Request failed: ' + errorText, [], 'system');
+            return;
           }
+          const data = await response.json();
+          if (data.title) {
+            selectedChat.title = data.title;
+          }
+          selectedChat.messages.push({
+            role: 'assistant',
+            content: data.answer || 'No answer returned.',
+            citations: Array.isArray(data.citations) ? data.citations : [],
+          });
+          updateSelectedChat(selectedChat.id, true);
         } catch (error) {
-          appendMessage('System', 'Unable to reach the server: ' + error.message);
+          appendMessageElement('System', 'Unable to reach the server: ' + error.message, [], 'system');
         } finally {
-          chatSpinner.classList.add('d-none');
+          chatSpinner?.classList.add('d-none');
         }
       });
     </script>
@@ -3309,6 +3574,10 @@ const server = http.createServer(async (req, res) => {
     const { bank, questions, groups, domains, questionCount, groupCount } = loadQuestionContext();
     const wrongAnswers = loadWrongAnswers();
     const knowledgeBase = loadKnowledgeBase();
+    const createdDefaultChat = ensureDefaultChat(knowledgeBase);
+    if (createdDefaultChat) {
+      saveKnowledgeBase(knowledgeBase);
+    }
 
     if (pathname === '/questions' && req.method === 'GET') {
       const perPage = 10;
@@ -3707,7 +3976,9 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/learning') {
       if (req.method === 'GET') {
-        const body = renderLearningHub({ knowledgeBase });
+        const requestedChatId = requestUrl.searchParams.get('chat');
+        const selectedChatId = findChatById(knowledgeBase, requestedChatId) ? requestedChatId : null;
+        const body = renderLearningHub({ knowledgeBase, selectedChatId });
         sendHtml(
           res,
           renderLayout({
@@ -3832,6 +4103,21 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (pathname === '/learning/chat/new' && req.method === 'POST') {
+      const newChat = normalizeChat({
+        id: crypto.randomUUID(),
+        title: 'New chat',
+        created_at: new Date().toISOString(),
+        messages: [],
+      });
+      knowledgeBase.chats.unshift(newChat);
+      saveKnowledgeBase(knowledgeBase);
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ chat_id: newChat.id, title: newChat.title, created_at: newChat.created_at }));
+      return;
+    }
+
     if (pathname === '/learning/chat' && req.method === 'POST') {
       const bodyBuffer = await collectRequestBody(req);
       let payload;
@@ -3850,6 +4136,14 @@ const server = http.createServer(async (req, res) => {
         res.end('Question text is required.');
         return;
       }
+      const chatId = (payload.chat_id || '').toString();
+      const chat = chatId ? findChatById(knowledgeBase, chatId) : null;
+      if (!chat) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end('Select a chat before asking a question.');
+        return;
+      }
       if (!knowledgeBase.documents.length) {
         res.statusCode = 400;
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -3860,9 +4154,23 @@ const server = http.createServer(async (req, res) => {
       try {
         const answer = await callQwenWithContext(question, snippets);
         const citations = snippets.map((snippet, index) => `${index + 1}: ${snippet.document} (chunk ${snippet.chunkNumber})`);
+        const timestamp = new Date().toISOString();
+        chat.messages = Array.isArray(chat.messages) ? chat.messages : [];
+        chat.messages.push({ id: crypto.randomUUID(), role: 'user', content: question, citations: [], created_at: timestamp });
+        chat.messages.push({
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: answer,
+          citations,
+          created_at: new Date().toISOString(),
+        });
+        if (!chat.title || chat.title === 'New chat') {
+          chat.title = question.slice(0, 60) || 'New chat';
+        }
+        saveKnowledgeBase(knowledgeBase);
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ answer, citations }));
+        res.end(JSON.stringify({ answer, citations, chat_id: chat.id, title: chat.title }));
       } catch (error) {
         res.statusCode = 500;
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');

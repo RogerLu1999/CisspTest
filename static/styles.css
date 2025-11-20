@@ -23,3 +23,44 @@ body {
 pre code {
   white-space: pre-wrap;
 }
+
+.chat-log {
+  background: #0b1e36;
+  color: #e3e8ef;
+  height: 320px;
+  overflow-y: auto;
+}
+
+.chat-bubble {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin-top: 0.25rem;
+  white-space: pre-wrap;
+}
+
+.chat-message.chat-user .chat-bubble {
+  background: rgba(33, 150, 243, 0.15);
+}
+
+.chat-message.chat-assistant .chat-bubble {
+  background: rgba(76, 175, 80, 0.18);
+}
+
+.chat-message.chat-system .chat-bubble {
+  background: rgba(255, 193, 7, 0.2);
+}
+
+.chat-list {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.chat-list-item.active {
+  background-color: #0d6efd;
+  color: #fff;
+}
+
+.chat-list-item .fw-bold {
+  max-width: 12rem;
+}
