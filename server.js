@@ -2103,26 +2103,47 @@ function renderLearningHub({ knowledgeBase, selectedChatId }) {
 
   return `
     <div class="row g-4">
-      <div class="col-lg-4">
-        <div class="card h-100">
+      <div class="col-12">
+        <div class="card mb-4">
           <div class="card-body">
-            <h5 class="card-title">Upload CISSP references</h5>
-            <p class="card-text">Upload PDF, Word, or plain text files to build a personal knowledge base for question answering.</p>
-            <form method="POST" action="/learning/upload" enctype="multipart/form-data" id="upload-form">
-              <div class="mb-3">
-                <label for="doc_title" class="form-label">Title (optional)</label>
-                <input type="text" class="form-control" id="doc_title" name="doc_title" placeholder="CISSP Study Notes" />
+            <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+              <div>
+                <h5 class="card-title mb-0" id="chat-header-title">${escapeHtml(selectedChatTitle)}</h5>
+                <p class="text-muted mb-0">Ask questions answered by your uploaded knowledge, powered by Qwen.</p>
               </div>
-              <div class="mb-3">
-                <label for="doc_file" class="form-label">Document file</label>
-                <input class="form-control" type="file" id="doc_file" name="doc_file" accept=".pdf,.doc,.docx,.txt" required />
+              <div class="d-flex align-items-center gap-2">
+                <button class="btn btn-sm btn-outline-primary" type="button" id="new-chat-btn">New chat</button>
+                <div class="spinner-border text-primary d-none" role="status" id="chat-spinner">
+                  <span class="visually-hidden">Loading...</span>
+                </div>
               </div>
-              <button type="submit" class="btn btn-primary">Upload to Knowledge Base</button>
-            </form>
+            </div>
+            <div class="row g-3">
+              <div class="col-lg-4">
+                <h6 class="mb-2">Chat history</h6>
+                <div class="list-group chat-list" id="chat-list" aria-label="Chat history">
+                  ${chatListItems}
+                </div>
+              </div>
+              <div class="col-lg-8">
+                <div id="chat-log" class="border rounded p-3 mb-3 chat-log">
+                  ${chatMessagesHtml}
+                </div>
+                <form id="chat-form">
+                  <input type="hidden" id="chat-id" name="chat_id" value="${escapeHtml(selectedChat ? selectedChat.id : '')}" />
+                  <div class="mb-3">
+                    <label for="chat-question" class="form-label">Your question</label>
+                    <textarea class="form-control" id="chat-question" name="question" rows="3" placeholder="How do I design a secure change management process?" required></textarea>
+                  </div>
+                  <button type="submit" class="btn btn-success">Ask Qwen</button>
+                  <div class="form-text">Responses include citations pointing to the documents you uploaded.</div>
+                </form>
+              </div>
+            </div>
           </div>
         </div>
       </div>
-      <div class="col-lg-8">
+      <div class="col-12">
         <div class="card mb-4">
           <div class="card-body">
             <h5 class="card-title">Knowledge base</h5>
@@ -2144,42 +2165,23 @@ function renderLearningHub({ knowledgeBase, selectedChatId }) {
             </div>
           </div>
         </div>
+      </div>
+      <div class="col-12">
         <div class="card">
           <div class="card-body">
-            <div class="d-flex align-items-center justify-content-between mb-3">
-              <div>
-                <h5 class="card-title mb-0" id="chat-header-title">${escapeHtml(selectedChatTitle)}</h5>
-                <p class="text-muted mb-0">Ask questions answered by your uploaded knowledge, powered by Qwen.</p>
+            <h5 class="card-title">Upload CISSP references</h5>
+            <p class="card-text">Upload PDF, Word, or plain text files to build a personal knowledge base for question answering.</p>
+            <form method="POST" action="/learning/upload" enctype="multipart/form-data" id="upload-form">
+              <div class="mb-3">
+                <label for="doc_title" class="form-label">Title (optional)</label>
+                <input type="text" class="form-control" id="doc_title" name="doc_title" placeholder="CISSP Study Notes" />
               </div>
-              <div class="spinner-border text-primary d-none" role="status" id="chat-spinner">
-                <span class="visually-hidden">Loading...</span>
+              <div class="mb-3">
+                <label for="doc_file" class="form-label">Document file</label>
+                <input class="form-control" type="file" id="doc_file" name="doc_file" accept=".pdf,.doc,.docx,.txt" required />
               </div>
-            </div>
-            <div class="row g-3">
-              <div class="col-lg-4">
-                <div class="d-flex align-items-center justify-content-between mb-2">
-                  <h6 class="mb-0">Chat history</h6>
-                  <button class="btn btn-sm btn-outline-primary" type="button" id="new-chat-btn">New chat</button>
-                </div>
-                <div class="list-group chat-list" id="chat-list" aria-label="Chat history">
-                  ${chatListItems}
-                </div>
-              </div>
-              <div class="col-lg-8">
-                <div id="chat-log" class="border rounded p-3 mb-3 chat-log">
-                  ${chatMessagesHtml}
-                </div>
-                <form id="chat-form">
-                  <input type="hidden" id="chat-id" name="chat_id" value="${escapeHtml(selectedChat ? selectedChat.id : '')}" />
-                  <div class="mb-3">
-                    <label for="chat-question" class="form-label">Your question</label>
-                    <textarea class="form-control" id="chat-question" name="question" rows="3" placeholder="How do I design a secure change management process?" required></textarea>
-                  </div>
-                  <button type="submit" class="btn btn-success">Ask Qwen</button>
-                  <div class="form-text">Responses include citations pointing to the documents you uploaded.</div>
-                </form>
-              </div>
-            </div>
+              <button type="submit" class="btn btn-primary">Upload to Knowledge Base</button>
+            </form>
           </div>
         </div>
       </div>
