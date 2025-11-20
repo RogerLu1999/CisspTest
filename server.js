@@ -2075,13 +2075,13 @@ function renderLearningHub({ knowledgeBase }) {
           });
           if (!response.ok) {
             const errorText = await response.text();
-            appendMessage('System', `Request failed: ${errorText}`);
+            appendMessage('System', 'Request failed: ' + errorText);
           } else {
             const data = await response.json();
             appendMessage('Qwen', data.answer || 'No answer returned.', data.citations || []);
           }
         } catch (error) {
-          appendMessage('System', `Unable to reach the server: ${error.message}`);
+          appendMessage('System', 'Unable to reach the server: ' + error.message);
         } finally {
           chatSpinner.classList.add('d-none');
         }
