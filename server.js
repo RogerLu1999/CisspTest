@@ -3,11 +3,14 @@ const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
 const crypto = require('crypto');
+const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 
 const BASE_DIR = __dirname;
 const DATA_DIR = path.join(BASE_DIR, 'data');
 const QUESTIONS_FILE = path.join(DATA_DIR, 'questions.json');
 const WRONG_FILE = path.join(DATA_DIR, 'wrong_questions.json');
+const KNOWLEDGE_FILE = path.join(DATA_DIR, 'learning_hub.json');
 const QUESTION_BANK_VERSION = 2;
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8000;
@@ -962,6 +965,32 @@ function resolveDomainInput(selection, customValue, fallback = 'General') {
   return fallback;
 }
 
+function collectRelevantSnippets(knowledgeBase, question, limit = 5) {
+  const queryTokens = tokenize(question);
+  const scored = [];
+  for (const doc of knowledgeBase.documents || []) {
+    const chunks = Array.isArray(doc.chunks) ? doc.chunks : [];
+    chunks.forEach((chunk, index) => {
+      const text = (chunk && chunk.text ? chunk.text : '').toString();
+      const score = scoreChunk(queryTokens, text);
+      scored.push({
+        score,
+        text,
+        document: doc.title || doc.filename || 'Untitled',
+        filename: doc.filename || 'Uploaded file',
+        chunkNumber: index + 1,
+        uploaded_at: doc.uploaded_at,
+      });
+    });
+  }
+  scored.sort((a, b) => b.score - a.score || a.chunkNumber - b.chunkNumber);
+  const top = scored.filter((item) => item.score > 0).slice(0, limit);
+  if (top.length) {
+    return top;
+  }
+  return scored.slice(0, Math.min(limit, scored.length));
+}
+
 async function callQwenStructuredImport(rawText, domain, extraInstructions = '') {
   if (!QWEN_API_KEY || !QWEN_API_KEY.trim()) {
     throw new Error('Set the DASHSCOPE_API_KEY environment variable to enable AI-assisted imports.');
@@ -1049,6 +1078,74 @@ async function callQwenStructuredImport(rawText, domain, extraInstructions = '')
   } catch (error) {
     throw new Error('Failed to parse the structured JSON returned by Qwen.');
   }
+}
+
+async function callQwenWithContext(question, snippets) {
+  if (!QWEN_API_KEY || !QWEN_API_KEY.trim()) {
+    throw new Error('Set the DASHSCOPE_API_KEY environment variable to enable the Learning Hub.');
+  }
+  if (typeof fetch !== 'function') {
+    throw new Error('The current runtime does not support fetch, which is required for the Learning Hub.');
+  }
+  const header =
+    'You are a CISSP study assistant. Answer using only the provided knowledge snippets. Include concise citations like [1] referencing the snippet numbers. If the snippets do not answer the question, state that clearly.';
+  const snippetText = snippets
+    .map((item, index) => `[${index + 1}] (${item.document}) ${item.text}`)
+    .join('\n');
+  const payload = {
+    model: QWEN_MODEL,
+    input: {
+      prompt: `${header}\n\nQuestion: ${question}\n\nKnowledge:\n${snippetText}\n\nAnswer:`,
+    },
+  };
+  let response;
+  try {
+    response = await fetch(QWEN_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${QWEN_API_KEY}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    throw new Error(`Failed to reach the Qwen service: ${error.message}`);
+  }
+  const errorText = !response.ok ? await response.text().catch(() => '') : '';
+  if (!response.ok) {
+    const preview = errorText ? `: ${errorText.slice(0, 300)}` : '';
+    throw new Error(`Qwen request failed with status ${response.status}${preview}`);
+  }
+  let data;
+  try {
+    data = await response.json();
+  } catch (error) {
+    throw new Error(`Unable to parse Qwen response as JSON: ${error.message}`);
+  }
+  if (data && typeof data === 'object') {
+    if (typeof data.output === 'string') {
+      return data.output;
+    }
+    if (data.output && typeof data.output.text === 'string') {
+      return data.output.text;
+    }
+    if (Array.isArray(data.output?.choices) && data.output.choices.length) {
+      const choice = data.output.choices[0];
+      if (choice && typeof choice.text === 'string') {
+        return choice.text;
+      }
+    }
+    if (Array.isArray(data.choices) && data.choices.length) {
+      const choice = data.choices[0];
+      if (choice && typeof choice.message?.content === 'string') {
+        return choice.message.content;
+      }
+      if (typeof choice.text === 'string') {
+        return choice.text;
+      }
+    }
+  }
+  throw new Error('Qwen response did not include any text to display.');
 }
 
 async function prepareAiImportFromRaw(rawText, domain, extraInstructions = '') {
@@ -1517,6 +1614,99 @@ function saveWrongAnswers(data) {
   writeJson(WRONG_FILE, data);
 }
 
+function loadKnowledgeBase() {
+  const data = readJson(KNOWLEDGE_FILE);
+  if (data && typeof data === 'object' && Array.isArray(data.documents)) {
+    return { documents: data.documents };
+  }
+  return { documents: [] };
+}
+
+function saveKnowledgeBase(data) {
+  writeJson(KNOWLEDGE_FILE, { documents: Array.isArray(data.documents) ? data.documents : [] });
+}
+
+function chunkText(content, maxLength = 900) {
+  if (!content) {
+    return [];
+  }
+  const normalized = content.replace(/\r\n/g, '\n');
+  const paragraphs = normalized.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
+  const chunks = [];
+  for (const paragraph of paragraphs) {
+    if (paragraph.length <= maxLength) {
+      chunks.push(paragraph);
+      continue;
+    }
+    let start = 0;
+    while (start < paragraph.length) {
+      const slice = paragraph.slice(start, start + maxLength);
+      chunks.push(slice);
+      start += maxLength;
+    }
+  }
+  if (!chunks.length && normalized.trim()) {
+    chunks.push(normalized.trim().slice(0, maxLength));
+  }
+  return chunks;
+}
+
+function tokenize(text) {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function scoreChunk(queryTokens, chunkTextValue) {
+  if (!queryTokens.length) {
+    return 0;
+  }
+  const chunkTokens = tokenize(chunkTextValue);
+  if (!chunkTokens.length) {
+    return 0;
+  }
+  const counts = new Map();
+  for (const token of chunkTokens) {
+    counts.set(token, (counts.get(token) || 0) + 1);
+  }
+  let score = 0;
+  for (const token of queryTokens) {
+    score += counts.get(token) || 0;
+  }
+  return score;
+}
+
+async function extractTextFromFile(upload) {
+  if (!upload || !upload.content || !upload.filename) {
+    return '';
+  }
+  const ext = path.extname(upload.filename).toLowerCase();
+  if (ext === '.txt') {
+    return upload.content.toString('utf8');
+  }
+  if (ext === '.pdf') {
+    try {
+      const parsed = await pdfParse(upload.content);
+      return parsed.text || '';
+    } catch (error) {
+      console.error('Failed to parse PDF:', error.message);
+      return '';
+    }
+  }
+  if (ext === '.docx' || ext === '.doc') {
+    try {
+      const parsed = await mammoth.extractRawText({ buffer: upload.content });
+      return parsed.value || '';
+    } catch (error) {
+      console.error('Failed to parse Word document:', error.message);
+      return '';
+    }
+  }
+  return upload.content.toString('utf8');
+}
+
 function updateWrongAnswers(questionId, selectedIndices, isCorrect) {
   const wrongAnswers = loadWrongAnswers();
   const lookup = new Map();
@@ -1659,6 +1849,9 @@ function renderLayout({ title, questionCount, wrongCount, domains, flashMessages
             <li class="nav-item">
               <a class="nav-link" href="/review">Review Mistakes</a>
             </li>
+            <li class="nav-item">
+              <a class="nav-link" href="/learning">Learning Hub</a>
+            </li>
           </ul>
           <div class="text-light small">
             <span class="me-3">Questions: ${escapeHtml(questionCount)}</span>
@@ -1751,6 +1944,149 @@ function renderIndex({ questionCount, wrongCount, domains, wrongDetails }) {
         </div>
       </div>
     </div>
+  `;
+}
+
+function renderLearningHub({ knowledgeBase }) {
+  const documents = Array.isArray(knowledgeBase.documents) ? knowledgeBase.documents : [];
+  const documentList = documents.length
+    ? documents
+        .map((doc) => {
+          const uploaded = doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleString() : 'Unknown';
+          const chunkCount = Array.isArray(doc.chunks) ? doc.chunks.length : 0;
+          return `
+            <tr>
+              <td>${escapeHtml(doc.title || doc.filename || 'Untitled')}</td>
+              <td>${escapeHtml(doc.filename || 'N/A')}</td>
+              <td>${escapeHtml(uploaded)}</td>
+              <td>${chunkCount}</td>
+            </tr>
+          `;
+        })
+        .join('\n')
+    : '<tr><td colspan="4" class="text-muted">No documents uploaded yet.</td></tr>';
+
+  return `
+    <div class="row g-4">
+      <div class="col-lg-4">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title">Upload CISSP references</h5>
+            <p class="card-text">Upload PDF, Word, or plain text files to build a personal knowledge base for question answering.</p>
+            <form method="POST" action="/learning/upload" enctype="multipart/form-data" id="upload-form">
+              <div class="mb-3">
+                <label for="doc_title" class="form-label">Title (optional)</label>
+                <input type="text" class="form-control" id="doc_title" name="doc_title" placeholder="CISSP Study Notes" />
+              </div>
+              <div class="mb-3">
+                <label for="doc_file" class="form-label">Document file</label>
+                <input class="form-control" type="file" id="doc_file" name="doc_file" accept=".pdf,.doc,.docx,.txt" required />
+              </div>
+              <button type="submit" class="btn btn-primary">Upload to Knowledge Base</button>
+            </form>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-8">
+        <div class="card mb-4">
+          <div class="card-body">
+            <h5 class="card-title">Knowledge base</h5>
+            <div class="table-responsive">
+              <table class="table align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>Title</th>
+                    <th>Filename</th>
+                    <th>Uploaded</th>
+                    <th>Chunks</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${documentList}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-body">
+            <div class="d-flex align-items-center justify-content-between mb-3">
+              <div>
+                <h5 class="card-title mb-0">Learning Hub chat</h5>
+                <p class="text-muted mb-0">Ask questions answered by your uploaded knowledge, powered by Qwen.</p>
+              </div>
+              <div class="spinner-border text-primary d-none" role="status" id="chat-spinner">
+                <span class="visually-hidden">Loading...</span>
+              </div>
+            </div>
+            <div id="chat-log" class="border rounded p-3 mb-3 chat-log" style="height: 320px; overflow-y: auto; background: #0b1e36; color: #e3e8ef;">
+              <div class="text-muted">Ask a question to begin.</div>
+            </div>
+            <form id="chat-form">
+              <div class="mb-3">
+                <label for="chat-question" class="form-label">Your question</label>
+                <textarea class="form-control" id="chat-question" name="question" rows="3" placeholder="How do I design a secure change management process?" required></textarea>
+              </div>
+              <button type="submit" class="btn btn-success">Ask Qwen</button>
+              <div class="form-text">Responses include citations pointing to the documents you uploaded.</div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      const chatForm = document.getElementById('chat-form');
+      const chatLog = document.getElementById('chat-log');
+      const chatSpinner = document.getElementById('chat-spinner');
+      function appendMessage(author, text, citations = []) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'mb-3';
+        const title = document.createElement('div');
+        title.className = 'fw-bold';
+        title.textContent = author;
+        wrapper.appendChild(title);
+        const body = document.createElement('div');
+        body.innerText = text;
+        wrapper.appendChild(body);
+        if (citations.length) {
+          const citeList = document.createElement('div');
+          citeList.className = 'small text-warning mt-1';
+          citeList.textContent = 'Citations: ' + citations.join(', ');
+          wrapper.appendChild(citeList);
+        }
+        chatLog.appendChild(wrapper);
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+      chatForm?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const questionInput = document.getElementById('chat-question');
+        const question = questionInput.value.trim();
+        if (!question) {
+          return;
+        }
+        appendMessage('You', question);
+        questionInput.value = '';
+        chatSpinner.classList.remove('d-none');
+        try {
+          const response = await fetch('/learning/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question }),
+          });
+          if (!response.ok) {
+            const errorText = await response.text();
+            appendMessage('System', `Request failed: ${errorText}`);
+          } else {
+            const data = await response.json();
+            appendMessage('Qwen', data.answer || 'No answer returned.', data.citations || []);
+          }
+        } catch (error) {
+          appendMessage('System', `Unable to reach the server: ${error.message}`);
+        } finally {
+          chatSpinner.classList.add('d-none');
+        }
+      });
+    </script>
   `;
 }
 
@@ -2821,33 +3157,40 @@ function parseMultipartFormData(bodyBuffer, boundary) {
   if (!boundary) {
     return result;
   }
-  const delimiter = `--${boundary}`;
-  const bodyText = bodyBuffer.toString('utf8');
-  const sections = bodyText.split(delimiter);
-  for (const rawSection of sections) {
-    if (!rawSection) {
+  const delimiter = Buffer.from(`--${boundary}`);
+  const ending = Buffer.from(`--${boundary}--`);
+  let startIndex = 0;
+  while (startIndex < bodyBuffer.length) {
+    let boundaryIndex = bodyBuffer.indexOf(delimiter, startIndex);
+    if (boundaryIndex === -1) {
+      break;
+    }
+    boundaryIndex += delimiter.length;
+    if (bodyBuffer[boundaryIndex] === 45 && bodyBuffer[boundaryIndex + 1] === 45) {
+      break;
+    }
+    if (bodyBuffer[boundaryIndex] === 13 && bodyBuffer[boundaryIndex + 1] === 10) {
+      boundaryIndex += 2;
+    }
+    const nextBoundary = bodyBuffer.indexOf(delimiter, boundaryIndex);
+    const nextEndBoundary = bodyBuffer.indexOf(ending, boundaryIndex);
+    const partEnd = nextBoundary !== -1 ? nextBoundary : nextEndBoundary;
+    if (partEnd === -1) {
+      break;
+    }
+    const part = bodyBuffer.slice(boundaryIndex, partEnd);
+    startIndex = partEnd;
+
+    const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerEnd === -1) {
       continue;
     }
-    let section = rawSection;
-    if (section.startsWith('\r\n')) {
-      section = section.slice(2);
+    const headerText = part.slice(0, headerEnd).toString('utf8');
+    let value = part.slice(headerEnd + 4);
+    if (value.slice(-2).toString('utf8') === '\r\n') {
+      value = value.slice(0, -2);
     }
-    if (section === '--' || section === '--\r\n') {
-      continue;
-    }
-    if (section.endsWith('\r\n')) {
-      section = section.slice(0, -2);
-    }
-    const separatorIndex = section.indexOf('\r\n\r\n');
-    if (separatorIndex === -1) {
-      continue;
-    }
-    const headerPart = section.slice(0, separatorIndex);
-    let valuePart = section.slice(separatorIndex + 4);
-    if (valuePart.endsWith('\r\n')) {
-      valuePart = valuePart.slice(0, -2);
-    }
-    const headers = headerPart.split('\r\n');
+    const headers = headerText.split('\r\n');
     const dispositionLine = headers.find((line) => /^content-disposition/i.test(line));
     if (!dispositionLine) {
       continue;
@@ -2865,10 +3208,11 @@ function parseMultipartFormData(bodyBuffer, boundary) {
         name: fieldName,
         filename: filenameMatch[1],
         contentType,
-        content: valuePart,
+        content: value,
+        text: value.toString('utf8'),
       });
     } else {
-      result.fields.set(fieldName, valuePart);
+      result.fields.set(fieldName, value.toString('utf8'));
     }
   }
   return result;
@@ -2938,6 +3282,7 @@ const server = http.createServer(async (req, res) => {
 
     const { bank, questions, groups, domains, questionCount, groupCount } = loadQuestionContext();
     const wrongAnswers = loadWrongAnswers();
+    const knowledgeBase = loadKnowledgeBase();
 
     if (pathname === '/questions' && req.method === 'GET') {
       const perPage = 10;
@@ -3334,6 +3679,101 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (pathname === '/learning') {
+      if (req.method === 'GET') {
+        const body = renderLearningHub({ knowledgeBase });
+        sendHtml(
+          res,
+          renderLayout({
+            title: 'Learning Hub · CISSP Test Simulator',
+            questionCount,
+            wrongCount: wrongAnswers.length,
+            domains,
+            flashMessages,
+            body,
+          }),
+        );
+        return;
+      }
+    }
+
+    if (pathname === '/learning/upload' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      const contentType = req.headers['content-type'] || '';
+      const boundaryMatch = contentType.match(/boundary="?([^";]+)"?/i);
+      const boundary = boundaryMatch ? boundaryMatch[1] : '';
+      const parsed = parseMultipartFormData(bodyBuffer, boundary);
+      const upload = parsed.files.find((file) => file.name === 'doc_file');
+      const title = parsed.fields.get('doc_title') || '';
+      if (!upload || !upload.content || !upload.filename) {
+        addFlash(session, 'danger', 'Choose a PDF, Word, or text file to upload.');
+        redirect(res, '/learning');
+        return;
+      }
+      const text = await extractTextFromFile(upload);
+      if (!text || !text.trim()) {
+        addFlash(session, 'danger', 'Unable to read any text from the uploaded file.');
+        redirect(res, '/learning');
+        return;
+      }
+      const chunks = chunkText(text, 850).map((value) => ({ id: crypto.randomUUID(), text: value }));
+      if (!chunks.length) {
+        addFlash(session, 'danger', 'No readable chunks were generated from the file.');
+        redirect(res, '/learning');
+        return;
+      }
+      knowledgeBase.documents.push({
+        id: crypto.randomUUID(),
+        title: title.trim() || upload.filename,
+        filename: upload.filename,
+        uploaded_at: new Date().toISOString(),
+        chunks,
+      });
+      saveKnowledgeBase(knowledgeBase);
+      addFlash(session, 'success', `Uploaded ${upload.filename} with ${chunks.length} knowledge snippets.`);
+      redirect(res, '/learning');
+      return;
+    }
+
+    if (pathname === '/learning/chat' && req.method === 'POST') {
+      const bodyBuffer = await collectRequestBody(req);
+      let payload;
+      try {
+        payload = JSON.parse(bodyBuffer.toString() || '{}');
+      } catch (error) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end('Provide a valid JSON body with your question.');
+        return;
+      }
+      const question = (payload.question || '').toString().trim();
+      if (!question) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end('Question text is required.');
+        return;
+      }
+      if (!knowledgeBase.documents.length) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end('Upload at least one document to use the Learning Hub.');
+        return;
+      }
+      const snippets = collectRelevantSnippets(knowledgeBase, question, 5);
+      try {
+        const answer = await callQwenWithContext(question, snippets);
+        const citations = snippets.map((snippet, index) => `${index + 1}: ${snippet.document} (chunk ${snippet.chunkNumber})`);
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ answer, citations }));
+      } catch (error) {
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end(`Failed to ask Qwen: ${error.message}`);
+      }
+      return;
+    }
+
     if (pathname === '/import/json') {
       if (req.method === 'GET') {
         const body = renderImportJson();
@@ -3362,10 +3802,10 @@ const server = http.createServer(async (req, res) => {
           const boundary = boundaryMatch ? boundaryMatch[1] : '';
           const parsed = parseMultipartFormData(bodyBuffer, boundary);
           const uploaded = parsed.files.find(
-            (file) => file.name === 'questions_file' && typeof file.content === 'string' && file.content.trim(),
+            (file) => file.name === 'questions_file' && typeof file.text === 'string' && file.text.trim(),
           );
           if (uploaded) {
-            payloadText = uploaded.content;
+            payloadText = uploaded.text;
           }
           if (!payloadText && parsed.fields.has('questions_json')) {
             payloadText = parsed.fields.get('questions_json') || '';
